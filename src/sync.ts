@@ -5,12 +5,14 @@ import { formatTime, priorityItems, isActionable } from './planning.ts';
 import type { Item, Messenger, MoodleGateway } from './types.ts';
 import { findChanges, fingerprint, formatChanges } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
+import { syncFailure } from './sync-errors.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
   private locks = new Map<number, Promise<void>>();
   private eventWork:Promise<void>|null=null;
   private deliveryWork:Promise<void>|null=null;
+  private manualWork:Promise<void>|null=null;
   private store: Store;
   private vault: Vault;
   private moodle: MoodleGateway;
@@ -76,10 +78,10 @@ export class SyncService {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
       this.store.transaction(() => {
         // Reconnecting can use a different Moodle identity: remove all previous account data.
-        for (const table of ['courses','items','done','classes','outbox','change_log']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
+        for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
         this.store.patchStudent(original.id,{moodleCipher:this.vault.seal(moodleToken,`moodle:${original.id}`),linkHash:null,linkExpires:null,calendarHash:null,calendarCipher:null,paused:false,initialized:false});
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
-        this.store.enqueue(original.id,`connected:${hash}`,'Moodle connected. Your existing courses and tasks are synced. Future changes will be announced. Use /priorities, /today, /prepare, and /calendar.');
+        this.store.enqueue(original.id,`connected:${hash}`,'✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
       });
     });
   }
@@ -91,6 +93,29 @@ export class SyncService {
     if(!result)throw new Error('Connect Moodle before refreshing.');
     return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');
   }
+  requestRefresh(id:number):string {
+    if(!this.store.getStudent(id)?.moodleCipher)return 'Connect Moodle first.';
+    const inserted=this.store.db.prepare('INSERT OR IGNORE INTO manual_sync_jobs(studentId,requestId,requestedAt) VALUES(?,?,?)').run(id,newSecret(),this.now());
+    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.' : '🔄 Sync is already queued or running. I’ll send the result here.';
+  }
+  processManualJobs():Promise<void> {
+    if(this.manualWork)return this.manualWork;
+    const work=(async()=>{
+      const jobs=this.store.db.prepare('SELECT studentId,requestId FROM manual_sync_jobs ORDER BY requestedAt LIMIT 100').all();
+      for(const job of jobs){
+        const id=Number(job.studentId);
+        let text:string;
+        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);continue;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');}
+        catch(error){text='⚠️ Sync unavailable\n\n'+syncFailure(error);}
+        this.store.transaction(()=>{
+          if(!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=? AND requestId=?').get(id,job.requestId))return;
+          if(this.store.getStudent(id))this.store.enqueue(id,`manual-sync:${job.requestId}`,text,true);
+          this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);
+        });
+      }
+    })();
+    this.manualWork=work.finally(()=>{this.manualWork=null;});return this.manualWork;
+  }
   recentUpdates(id:number):string {
     const student=this.store.getStudent(id);if(!student)return 'Connect Moodle first.';
     const rows=this.store.recentChanges(id);
@@ -101,6 +126,7 @@ export class SyncService {
     return this.locked(id, async () => {
       const s = this.store.getStudent(id); if (!s?.moodleCipher || (s.paused && !manual)) return null;
       try {
+        this.store.setMeta(`lastSyncAttempt:${id}`,String(this.now()));
         const token = this.vault.open(s.moodleCipher,`moodle:${id}`);
         const snapshot = await this.moodle.snapshot(token,this.now());
         const latest = this.store.getStudent(id);
@@ -117,12 +143,12 @@ export class SyncService {
         }
         this.store.saveSnapshot(id,snapshot,notices,this.now(),this.now()+this.pollSeconds+randomInt(0,30),changes);
         return {checkedAt:this.now(),changes,baseline:!s.initialized};
-      } catch {
+      } catch(error) {
         if (this.store.getStudent(id)?.moodleCipher!==s.moodleCipher) return null;
         const failedBefore = this.store.getStudent(id)?.lastError?.startsWith('Sync failed');
-        this.store.patchStudent(id,{lastError:'Sync failed. Previous data is preserved; Moodle may be unavailable or your access may need reconnecting.',nextSyncAt:this.now()+Math.min(3600,this.pollSeconds*(failedBefore?4:1))});
+        this.store.patchStudent(id,{lastError:'Sync failed. '+syncFailure(error),nextSyncAt:this.now()+Math.min(3600,this.pollSeconds*(failedBefore?4:1))});
         if (notify && !failedBefore) this.store.enqueue(id,`failure:${s.lastSyncAt || 0}`,'Moodle sync failed. I kept your last successful data. Tap 🔄 Auto update to try again, or check ⚙️ Settings → ℹ️ Status. Reconnect if your Moodle access has expired.');
-        throw new Error('Moodle sync failed. Previous data has been preserved.');
+        throw error instanceof Error ? error : new Error('Moodle sync failed. Previous data has been preserved.');
       }
     });
   }
@@ -152,7 +178,7 @@ export class SyncService {
   }
   private async deliverPending(): Promise<void> {
     for (const entry of this.store.pending(this.now())) {
-      if (!this.store.getStudent(entry.studentId) || this.store.getStudent(entry.studentId)?.paused) continue;
+      if (!this.store.getStudent(entry.studentId) || (this.store.getStudent(entry.studentId)?.paused && !entry.interactive)) continue;
       try { await this.messenger.send(entry.chatId,entry.text); this.store.delivered(entry.id,this.now()); }
       catch(error) {
         const status=(error as {statusCode?:number})?.statusCode;
@@ -169,8 +195,13 @@ export class SyncService {
   }
   async tick(): Promise<void> {
     // Website reads happen only after received Moodle events or explicit student actions.
+    await this.processManualJobs();
     await this.processEvents();
     this.reminders(); await this.deliver();
+  }
+  async drain():Promise<void>{
+    await Promise.allSettled([this.manualWork,this.eventWork].filter((work):work is Promise<void>=>work!==null));
+    if(this.deliveryWork)await this.deliveryWork.catch(()=>{});
   }
   processEvents():Promise<void> {
     if(this.eventWork)return this.eventWork;

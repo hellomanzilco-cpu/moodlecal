@@ -41,9 +41,11 @@ test('emoji reply buttons navigate the main menu and settings without slash comm
   const alice = s.connected(101, [item('assignment:alice', 'Alice assignment')]);
   const bob = s.connected(202);
   await s.send(101, '/start');
-  assert.match(s.sent.at(-1)!.text, /Use the buttons below/);
+  assert.match(s.sent.at(-1)!.text, /Your UWED study planner/);
+  assert.ok(s.sent.at(-1)!.text.length<350);
   assert.equal(s.sent.at(-1)!.options?.reply_markup?.is_persistent, true);
-  assert.deepEqual(labels(s.sent.at(-1)!.options), ['🏠 Today', '📅 This week', '🎯 Priorities', '📚 My courses', '📝 Assignments', '📖 Prepare', '🔄 Auto update', '📰 Recent updates', '🗓 Calendar', '⚙️ Settings', '🔗 Connect Moodle']);
+  assert.deepEqual(labels(s.sent.at(-1)!.options), ['🏠 Today', '📝 Assignments', '📚 My courses', '🔄 Sync', '🧭 More', '⚙️ Settings']);
+  await s.send(101,'🧭 More');assert.ok(labels(s.sent.at(-1)!.options).includes('🗓 Calendar'));
   assert.match(await s.send(101, '🎯 Priorities'), /Alice assignment/);
   await s.send(101, '⚙️ Settings');
   assert.ok(labels(s.sent.at(-1)!.options).includes('🔔 Pause alerts'));
@@ -395,4 +397,17 @@ test('Telegram long polling filters messages and sanitizes errors while preservi
   await assert.rejects(network.getUpdates(0), error => error instanceof TelegramError && !String(error).includes('test_token'));
   const limited = new TelegramClient('123:test_token', async () => Response.json({ ok: false, description: 'secret payload', parameters: { retry_after: 42 } }, { status: 429 }));
   await assert.rejects(limited.getUpdates(0), error => error instanceof TelegramError && error.retryAfter === 42 && error.statusCode === 429 && !String(error).includes('secret payload'));
+});
+test('assignment pages stay concise, support both directions and do not expose another student',async t=>{
+ const s=setup(t);s.connected(101,Array.from({length:14},(_,index)=>({...item('assignment:'+index,'Task '+String(index).padStart(2,'0')),submissionStatus:'outstanding' as const,dueAt:now()+3600})));
+ s.connected(202,[{...item('assignment:private','Private Bob task'),submissionStatus:'outstanding'}]);
+ const first=await s.send(101,'⏳ Next deadlines');assert.match(first,/Task 00/);assert.doesNotMatch(first,/Task 06|Private Bob/);assert.match(first,/1–6 of 14/);
+ assert.ok(labels(s.sent.at(-1)!.options).includes('➡️ Next page'));
+ const second=await s.send(101,'➡️ Next page');assert.match(second,/Task 06/);assert.doesNotMatch(second,/Task 00|Task 12/);
+ assert.match(await s.send(101,'⬅️ Previous page'),/Task 00/);
+ await s.send(101,'⬅️ Main menu');assert.ok(!labels(s.sent.at(-1)!.options).includes('➡️ Next page'));
+});
+test('new students see only connection and help, with no lengthy command list',async t=>{
+ const s=setup(t);const welcome=await s.send(101,'/start');assert.ok(welcome.length<250);assert.doesNotMatch(welcome,/\/class|\/mute/);
+ assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','❓ Help']);
 });

@@ -4,7 +4,7 @@ A Telegram study assistant for students at **moodle.uwed.uz**. Each student conn
 
 This repository contains the implementation and [delivery plan](docs/PLAN.md). Read-only login and assignment inspection were tested with a real UWED student account on **16 October 2026**. The emoji menu and assignment views are implemented. The university-side event bridge has **not been installed or activated**, and live automatic change notifications have not been validated.
 
-The pilot is hosted on Railway independently of the owner's computer. Open [@calmoodlebot](https://t.me/calmoodlebot) in a private Telegram chat. [Deployment and operating details](docs/HOSTING.md) include persistent storage, manual deployments, and the Free/Trial credit limits. The university event bridge is still required for website-triggered automatic updates; **🔄 Auto update** works through an explicit student request.
+The pilot is hosted on Railway independently of the owner's computer. Open [@calmoodlebot](https://t.me/calmoodlebot) in a private Telegram chat. [Deployment and operating details](docs/HOSTING.md) include persistent storage, manual deployments, and the Free/Trial credit limits. The university event bridge is still required for website-triggered automatic updates; **🔄 Sync** works through an explicit student request.
 
 **Moodle is never checked on a fixed interval.** Automatic website changes require UWED IT to install the included [Moodle event bridge](docs/MOODLE_EVENTS.md) and connect it to a public HTTPS receiver. A regular student account cannot enable that server feature. Until then, the bot uses saved data and explicit student refreshes; it does not fall back to interval checks.
 
@@ -32,14 +32,14 @@ For your own pilot account, run `npm run account:link`. Open the private link in
 - Provides today/week views, deadline priorities, preparation lists with Moodle links, and personal done/undo controls.
 - Uses persistent emoji buttons for navigation and groups assignments into outstanding, submitted awaiting grades, and submitted graded work.
 - Focuses on the next open deadline per course, plus unfinished overdue work that remains accessible. Later and undated assignments have a separate view; submitting early does not advance to the following deadline.
-- Provides **🔄 Auto update** to fetch and explain website changes, and **📰 Recent updates** to review each student's saved change history.
+- Provides **🔄 Sync** to fetch and explain website changes, and **📰 Recent updates** to review each student's saved change history.
 - Evaluates 24-hour / 1-hour reminders from cached active deadlines locally, without requesting Moodle on a timer. Stale or failed data can suppress reminders.
 - Publishes a revocable private ICS calendar containing deadlines and classes.
 - Lets students add a recurring timetable when Moodle does not supply scheduled class times.
 
 Coverage depends on the bridge's supported Moodle events, the student's API permissions, and exposed metadata. File replacement is detected when exposed metadata changes; inaccessible or removed items can produce a no-longer-available notice after refresh. The service does not inspect presentation contents or promise notification of every possible LMS change. Term controls appear when represented as a supported assignment, quiz, or event. Preparation lists use available descriptions and links.
 
-Moodle cron and its task workers deliver queued events, so automatic notices have queue/network latency. A clock-only transition to a future opening time does not necessarily emit an event: it may require the next relevant event or **🔄 Auto update**. The current bridge does not schedule release-time checks. [Event coverage and timing](docs/MOODLE_EVENTS.md).
+Moodle cron and its task workers deliver queued events, so automatic notices have queue/network latency. A clock-only transition to a future opening time does not necessarily emit an event: it may require the next relevant event or **🔄 Sync**. The current bridge does not schedule release-time checks. [Event coverage and timing](docs/MOODLE_EVENTS.md).
 
 ## Run locally
 
@@ -76,7 +76,7 @@ If UWED requires browser SSO, MFA, CAPTCHA, or denies mobile token creation, the
 
 ## Student menu
 
-Send `/start` once to open the persistent keyboard, then tap the emoji buttons. You can return from a submenu with **⬅️ Main menu**.
+Press Start to open the persistent keyboard. Connected students see six buttons: Today, Assignments, My courses, Sync, More, and Settings. More contains This week, Priorities, Prepare, Calendar, Recent updates, and My timetable. Settings contains alerts, connection, status, help, and time zone. New students see Connect Moodle and Help. Return with **⬅️ Main menu**. Task lists show six items per page with Previous / Next buttons. The full introduction appears before Start; the chat opens with a short welcome.
 
 | Button | Action |
 | --- | --- |
@@ -86,7 +86,7 @@ Send `/start` once to open the persistent keyboard, then tap the emoji buttons. 
 | 📚 My courses | Your enrolled courses, with course buttons for preparation. |
 | 📝 Assignments | Counts and category buttons for your assignment submission states. |
 | 📖 Prepare | Choose a course for a checklist from its descriptions and material links. |
-| 🔄 Auto update | Pull current Moodle data and show what changed since the last successful check. |
+| 🔄 Sync | Pull current Moodle data and show what changed since the last successful check. |
 | 📰 Recent updates | Read your saved website change history. |
 | 🗓 Calendar | Your private calendar subscription URL. |
 | ⚙️ Settings | Alerts, time zone, manual sync, connection status, and disconnect. |
@@ -96,7 +96,7 @@ Under **📝 Assignments**, choose **⏳ Next deadlines**, **🕓 Later / undate
 
 Moodle's effective access/permission result, opening time, cutoff, and conditional restrictions determine technical availability. An assignment without a deadline appears in **🕓 Later / undated**, outside current priorities, reminders, and the calendar. The bot invents no deadline.
 
-Under **⚙️ Settings**, use **🔔 Pause alerts** or **🔔 Resume alerts**, **🌍 Time zone**, **🔄 Auto update**, and **ℹ️ Status**. Time zone prompts you to type an IANA zone such as `Asia/Tashkent`. **🔒 Disconnect** opens a confirmation; **🗑 Yes, disconnect** deletes your saved connection and personal data, while **⬅️ Main menu** cancels.
+Under **⚙️ Settings**, use **🔔 Pause alerts** or **🔔 Resume alerts**, **🌍 Time zone**, **🔄 Sync**, and **ℹ️ Status**. Time zone prompts you to type an IANA zone such as `Asia/Tashkent`. **🔒 Disconnect** opens a confirmation; **🗑 Yes, disconnect** deletes your saved connection and personal data, while **⬅️ Main menu** cancels.
 
 Slash commands remain available for compatibility and advanced controls:
 
@@ -187,6 +187,6 @@ Moodle tokens and recoverable calendar secrets use AES-256-GCM encryption at res
 
 Notification delivery uses a persistent outbox with retries. A process crash after Telegram accepts a message but before the database records success can produce a duplicate. Repeated delivery of a Telegram command reuses its cached response and menu so a transient reply failure does not create a timetable entry twice. If Telegram permanently refuses delivery, the affected student is paused; after fixing access, open **⚙️ Settings → 🔔 Resume alerts**.
 
-Moodle outages, token expiry, disabled API functions, and an offline bot can delay event jobs and reminders. **⚙️ Settings → ℹ️ Status** states that interval checks are off and whether a signed website event has arrived. **🔄 Auto update**, reconnecting, and resuming are explicit actions that can request Moodle. Ordinary menu views read cached data. Keep checking Moodle for authoritative requirements during the pilot.
+Moodle outages, token expiry, disabled API functions, and an offline bot can delay event jobs and reminders. **⚙️ Settings → ℹ️ Status** states that interval checks are off and whether a signed website event has arrived. **🔄 Sync**, reconnecting, and resuming are explicit actions that can request Moodle. Ordinary menu views read cached data. Keep checking Moodle for authoritative requirements during the pilot.
 
 The [plan](docs/PLAN.md) covers the remaining steps: UWED approval and event-bridge installation, staging validation of automatic notices and calendar subscriptions, monitoring/backups, and a queue/database migration if multiple workers become necessary.

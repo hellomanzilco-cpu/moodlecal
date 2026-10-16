@@ -7,6 +7,8 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { SyncService } from './sync.ts';
 import type { MoodleGateway } from './types.ts';
+import { MoodleError } from './moodle.ts';
+import { syncFailure } from './sync-errors.ts';
 
 function escapeHtml(value: string) { return value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!)); }
 export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>) {
@@ -30,26 +32,27 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
     reply.header('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`);
     return reply.type('text/html; charset=utf-8').send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect · Moodle Calendar</title>
-<style nonce="${nonce}">*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#18283d;font:16px/1.6 system-ui,sans-serif}main{max-width:540px;margin:6vh auto;padding:32px;background:white;border:1px solid #dce4ed;border-radius:20px}h1{font-size:28px;line-height:1.2}label{display:block;margin:18px 0 5px}input,button{width:100%;padding:12px;border:1px solid #a9b7c9;border-radius:8px;font:inherit}button{background:#175c4c;color:white;margin-top:24px;cursor:pointer}small{color:#52627a}details{margin-top:20px}#result{white-space:pre-wrap}@media(max-width:600px){main{margin:16px;padding:24px}}</style></head>
+<style nonce="${nonce}">*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#18283d;font:16px/1.6 system-ui,sans-serif}main{max-width:540px;margin:6vh auto;padding:32px;background:white;border:1px solid #dce4ed;border-radius:20px}h1{font-size:28px;line-height:1.2}label{display:block;margin:18px 0 5px}input,button{width:100%;padding:12px;border:1px solid #a9b7c9;border-radius:8px;font:inherit}button{background:#175c4c;color:white;margin-top:24px;cursor:pointer}small{color:#52627a}details{margin-top:20px}#result{white-space:pre-wrap}.consent{display:flex;gap:10px;align-items:flex-start}.consent input{width:auto;margin-top:7px}@media(max-width:600px){main{margin:16px;padding:24px}}</style></head>
 <body><main><small>MOODLE CALENDAR · PRIVATE CONNECTION</small><h1>Your classes, in one place.</h1><p>Connect your student account at <strong>${escapeHtml(new URL(config.moodleUrl).hostname)}</strong>.</p>
 <p>Only connect through a Moodle Calendar operator you trust. A Moodle token grants the service access to your account. It is encrypted in storage; no Moodle password is stored.</p>
 <form id="form"><label for="token">Moodle web service token</label><input id="token" type="password" autocomplete="off" maxlength="512"><small>Use your own token if the university provides one.</small>
 <details><summary>Connect using your Moodle username and password</summary><p>Your credentials are sent over HTTPS to Moodle once to obtain a token. This may not work with SSO or university restrictions.</p><label for="username">Username</label><input id="username" autocomplete="username" maxlength="256"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" maxlength="512"></details>
-<button type="submit" id="submit">Connect Moodle</button></form><p id="result" role="status"></p><small>We sync accessible course materials, tasks, and calendar events. Link expires after 15 minutes. Send /disconnect in Telegram to delete your stored account data.</small></main>
+<label class="consent"><input id="consent" type="checkbox" required><span>I agree to connect my account and let Moodle Calendar read my courses, tasks, submission statuses and visible grades.</span></label>
+<button type="submit" id="submit">Connect Moodle</button></form><p id="result" role="status"></p><p><a id="telegram" href="https://t.me/calmoodlebot?start=connected" hidden>✅ Return to Telegram</a></p><p><a href="${escapeHtml(config.moodleUrl)}/login/index.php" target="_blank" rel="noopener noreferrer">Open UWED Moodle</a></p><small>Your token is encrypted. Link expires after 15 minutes. Use Settings → Disconnect in Telegram to remove your saved account.</small></main>
 <script nonce="${nonce}">
 const linkToken=new URLSearchParams(location.hash.slice(1)).get('token');history.replaceState(null,'','/connect');
 const form=document.getElementById('form'),result=document.getElementById('result'),button=document.getElementById('submit');
 if(!linkToken){result.textContent='Open a fresh connection link from /connect in Telegram.';button.disabled=true;}
 form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;result.textContent='Connecting and syncing your courses…';
 const token=document.getElementById('token'),username=document.getElementById('username'),password=document.getElementById('password');
-try{const response=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linkToken,token:token.value.trim(),username:username.value.trim(),password:password.value})});
-const data=await response.json();result.textContent=response.ok?'Connected. Return to Telegram and use /priorities or /calendar.':data.error;
-token.value='';password.value='';if(response.ok){form.hidden=true;}else{button.disabled=false;}}
+try{const response=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linkToken,token:token.value.trim(),username:username.value.trim(),password:password.value,consent:document.getElementById('consent').checked})});
+const data=await response.json();result.textContent=response.ok?'Connected. Return to Telegram to open your courses and assignments.':data.error;
+token.value='';password.value='';if(response.ok){form.hidden=true;document.getElementById('telegram').hidden=false;}else{button.disabled=false;}}
 catch{result.textContent='Connection interrupted. Please try again.';button.disabled=false;password.value='';}});
 </script></body></html>`);
   });
-  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string}}>('/api/connect',{
-    schema:{body:{type:'object',additionalProperties:false,required:['linkToken'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512}}}},
+  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string;consent:boolean}}>('/api/connect',{
+    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','consent'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512},consent:{type:'boolean',const:true}}}},
   },async (request,reply) => {
     if (request.headers.origin!==new URL(config.publicUrl).origin) return reply.code(403).send({error:'Open the connection page from your Telegram link.'});
     const now=Math.floor(Date.now()/1000); const {linkToken}=request.body;
@@ -67,7 +70,8 @@ catch{result.textContent='Connection interrupted. Please try again.';button.disa
       }
       await service.connect(linkToken,token);
       return {ok:true};
-    } catch {
+    } catch(error) {
+      if(error instanceof MoodleError)return reply.code(error.reason==='network'?503:400).send({error:syncFailure(error),code:error.reason});
       return reply.code(400).send({error:'Moodle could not be connected. Check your credentials and link expiry. Student web service permissions may need university IT support. Your previous data is preserved.'});
     } finally {
       request.body.password='';request.body.token='';

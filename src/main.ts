@@ -72,6 +72,6 @@ async function main() {
   const stop=() => controller.abort();
   process.once('SIGINT',stop); process.once('SIGTERM',stop);
   await new Promise<void>(resolve => signal.addEventListener('abort',()=>resolve(),{once:true}));
-  await app.close(); await Promise.allSettled(tasks); await queue; store.close();
+  await app.close(); await Promise.allSettled(tasks); await queue; await service.drain(); store.close();
 }
 main().catch(() => { console.error('Moodle Calendar failed to start. Check environment configuration, database access, and Telegram webhook mode.');process.exitCode=1; });

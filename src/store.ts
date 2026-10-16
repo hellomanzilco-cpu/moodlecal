@@ -54,7 +54,12 @@ export class Store {
         studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
         revision INTEGER NOT NULL DEFAULT 1,attempts INTEGER NOT NULL DEFAULT 0,nextAttempt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS manual_sync_jobs (
+        studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+        requestId TEXT NOT NULL,requestedAt INTEGER NOT NULL
+      );
       PRAGMA user_version=1;`);
+    if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
   }
   close() { this.db.close(); }
   transaction<T>(work: () => T): T {
@@ -82,6 +87,7 @@ export class Store {
     this.transaction(() => {
       const s=this.getStudent(id);
       if(s) this.db.prepare('DELETE FROM replies WHERE chatId=?').run(s.chatId);
+      this.db.prepare('DELETE FROM meta WHERE key=?').run(`lastSyncAttempt:${id}`);
       this.db.prepare('DELETE FROM students WHERE id=?').run(id);
     });
   }
@@ -143,8 +149,8 @@ export class Store {
     return Number(this.db.prepare('INSERT INTO classes(studentId,courseId,title,weekday,time,duration,location,until) VALUES(?,?,?,?,?,?,?,?)').run(id,c.courseId,c.title,c.weekday,c.time,c.duration,c.location,c.until).lastInsertRowid);
   }
   removeClass(id: number, classId: number): boolean { return !!this.db.prepare('DELETE FROM classes WHERE studentId=? AND id=?').run(id, classId).changes; }
-  enqueue(id: number, key: string, text: string) { this.db.prepare('INSERT OR IGNORE INTO outbox(studentId,dedupeKey,text) VALUES(?,?,?)').run(id, key, text); }
-  pending(now: number): OutboxEntry[] { return this.db.prepare('SELECT o.id,o.studentId,s.chatId,o.text,o.attempts FROM outbox o JOIN students s ON s.id=o.studentId WHERE sentAt IS NULL AND nextAttempt<=? AND s.paused=0 ORDER BY o.id LIMIT 100').all(now) as unknown as OutboxEntry[]; }
+  enqueue(id: number, key: string, text: string,interactive=false) { this.db.prepare('INSERT OR IGNORE INTO outbox(studentId,dedupeKey,text,interactive) VALUES(?,?,?,?)').run(id, key, text,Number(interactive)); }
+  pending(now: number): OutboxEntry[] { return this.db.prepare('SELECT o.id,o.studentId,s.chatId,o.text,o.attempts,o.interactive FROM outbox o JOIN students s ON s.id=o.studentId WHERE sentAt IS NULL AND nextAttempt<=? AND (s.paused=0 OR o.interactive=1) ORDER BY o.id LIMIT 100').all(now) as unknown as OutboxEntry[]; }
   delivered(id: number, now: number) { this.db.prepare('UPDATE outbox SET sentAt=? WHERE id=?').run(now,id); }
   retry(id: number, now: number, attempts: number) { this.db.prepare('UPDATE outbox SET attempts=attempts+1,nextAttempt=? WHERE id=?').run(now + Math.min(3600, 15 * 2 ** Math.min(attempts, 8)),id); }
   hasUpdate(id: number): boolean { return !!this.db.prepare('SELECT 1 FROM updates WHERE id=?').get(id); }

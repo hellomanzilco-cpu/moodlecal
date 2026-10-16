@@ -7,6 +7,7 @@ import { SyncService } from '../src/sync.ts';
 import { createApp } from '../src/api.ts';
 import { loadConfig } from '../src/config.ts';
 import type { MoodleGateway } from '../src/types.ts';
+import { MoodleError } from '../src/moodle.ts';
 
 function fixture() {
   const config=loadConfig({ENCRYPTION_KEY:randomBytes(32).toString('base64'),PUBLIC_URL:'https://planner.test',TELEGRAM_MODE:'webhook',WEBHOOK_SECRET:'a'.repeat(43)});
@@ -26,7 +27,7 @@ test('connection page has no external assets, no bearer secret in HTML, and rest
 });
 test('connect enforces origin and uses one-time links; password is never returned or stored',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
-  const payload={linkToken:f.raw,username:'alice',password:'very-secret-password'};
+  const payload={linkToken:f.raw,username:'alice',password:'very-secret-password',consent:true};
   const evil=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://evil.test'},payload});assert.equal(evil.statusCode,403);
   const good=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload});assert.equal(good.statusCode,200);assert.equal(f.usedPassword,payload.password);
   assert.doesNotMatch(good.body,/very-secret-password|moodle-token/);assert.doesNotMatch(JSON.stringify(f.store.db.prepare('SELECT * FROM students').all()),/very-secret-password|moodle-token/);
@@ -34,7 +35,7 @@ test('connect enforces origin and uses one-time links; password is never returne
 });
 test('connection failures are sanitized and do not bind a Moodle token',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});f.fail=true;
-  const response=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload:{linkToken:f.raw,token:'private-moodle-token'}});
+  const response=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload:{linkToken:f.raw,token:'private-moodle-token',consent:true}});
   assert.equal(response.statusCode,400);assert.doesNotMatch(response.body,/private-moodle-token|private error/);assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);
 });
 test('calendar feed is private, supports revocation and disconnect, and serves only its owner data',async t => {
@@ -54,4 +55,19 @@ test('webhook accepts only the configured Telegram secret',async t => {
 test('live HTTP listener serves health and setup readiness',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});const url=await f.app.listen({host:'127.0.0.1',port:0});
   assert.deepEqual(await (await fetch(url+'/healthz')).json(),{ok:true});assert.equal((await fetch(url+'/readyz')).status,503);
+});
+test('connection requires explicit consent before any credential exchange',async t=>{
+  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+  for(const consent of [undefined,false]){
+    const response=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload:{linkToken:f.raw,username:'alice',password:'private-password',consent}});
+    assert.equal(response.statusCode,400);assert.equal(f.usedPassword,'');assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);
+  }
+});
+test('cloud connectivity failures return 503 without blaming credentials or consuming the connection link',async t=>{
+ const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+ const moodle:MoodleGateway={async identify(){throw new Error('unused');},async snapshot(){throw new Error('unused');},async login(){throw new MoodleError('secret internal URL',true,'network');}};
+ const app=createApp(f.config,f.store,f.service,moodle,async()=>{});t.after(()=>app.close());
+ const response=await app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload:{linkToken:f.raw,username:'alice',password:'private-password',consent:true}});
+ assert.equal(response.statusCode,503);assert.match(response.body,/UWED Moodle is not responding/);assert.doesNotMatch(response.body,/private-password|secret internal|Check your credentials/);
+ assert.ok(f.store.byLink(f.store.getStudent(f.s.id)!.linkHash!,Math.floor(Date.now()/1000)));
 });

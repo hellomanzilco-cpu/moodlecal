@@ -38,7 +38,7 @@ export interface ClassEntry {
   id: number; courseId: number; title: string; weekday: number; time: string;
   duration: number; location: string; until: string;
 }
-export interface OutboxEntry { id: number; studentId: number; chatId: number; text: string; attempts: number }
+export interface OutboxEntry { id: number; studentId: number; chatId: number; text: string; attempts: number; interactive?:number }
 export interface MoodleGateway {
   identify(token: string): Promise<Identity>;
   login(username: string, password: string): Promise<string>;

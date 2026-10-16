@@ -41,7 +41,7 @@ export function findChanges(previous:Item[],next:Item[],timezone:string):Website
   return changes;
 }
 export function formatChanges(result:RefreshResult,timezone:string):string {
-  const heading=`🔄 Website checked · ${formatTime(result.checkedAt,timezone)} (${timezone})`;
+  const heading=`✅ Sync complete\n${formatTime(result.checkedAt,timezone)} · ${timezone}`;
   if(result.baseline)return heading+'\n\nYour first snapshot is saved. Future refreshes will show what changed.';
   if(!result.changes.length)return heading+'\n\nNo changes since the last successful website check.';
   const visible=result.changes.slice(0,15);

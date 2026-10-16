@@ -42,7 +42,7 @@ Sources checked 16 October 2026: [plans](https://docs.railway.com/pricing/plans)
 
 4. Generate a public Railway HTTPS domain. The app uses `RAILWAY_PUBLIC_DOMAIN` automatically for connection links and calendars. Do **not** copy the local `PUBLIC_URL=http://localhost:3000` or `HOST=127.0.0.1` to Railway. Set `PUBLIC_URL` only for a custom HTTPS domain. Railway supplies `PORT`; leave the start command unset so Docker runs `node src/main.ts` without needing an `.env` file.
 5. Stop the local bot before starting the cloud copy: Telegram must have exactly one update consumer for this token. Polling here retrieves Telegram messages; it does not poll Moodle.
-6. Deploy, verify `/healthz` and `/readyz`, then test **🔄 Auto update**, **📝 Assignments**, **📰 Recent updates**, and the calendar URL in your private chat. Restart Railway and verify the student connection survives. Your computer can then be turned off.
+6. Deploy, verify `/healthz` and `/readyz`, then test **🔄 Sync**, **📝 Assignments**, **📰 Recent updates**, and the calendar URL in your private chat. Restart Railway and verify the student connection survives. Your computer can then be turned off.
 
 Volume-backed redeployments may briefly interrupt service. Disable automatic deployments during the pilot if you want to deploy changes deliberately. Check Railway's usage estimate and credit balance after deployment and during the first week.
 
@@ -60,6 +60,6 @@ The container includes `scripts/backup.mjs`, so `npm run backup` can run inside 
 
 ## Website changes and the Auto update button
 
-**🔄 Auto update** reads the website when tapped and reports new documents, revised deadlines, submission changes, and visible grades. It compares against the last successful snapshot. **📰 Recent updates** stores up to 200 scoped changes from the last 30 days and displays the latest 30.
+**🔄 Sync** reads the website when tapped and reports new documents, revised deadlines, submission changes, and visible grades. It compares against the last successful snapshot. **📰 Recent updates** stores up to 200 scoped changes from the last 30 days and displays the latest 30.
 
 There is no periodic Moodle change scan. Hosting the bot 24/7 keeps it ready to respond and deliver deadline reminders from saved data. Automatic website-triggered updates still require UWED to configure the [Moodle bridge](MOODLE_EVENTS.md). Hosting alone does not add that university permission.

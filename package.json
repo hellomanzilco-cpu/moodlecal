@@ -13,6 +13,7 @@
     "diagnose": "node scripts/diagnose.mjs",
     "account:check": "node scripts/check-account.mjs",
     "bot:info": "node scripts/bot-info.mjs",
+    "bot:configure": "node scripts/configure-bot.mjs",
     "account:link": "node scripts/link-account.mjs",
     "sync:once": "node scripts/refresh-once.mjs",
     "backup": "node scripts/backup.mjs"

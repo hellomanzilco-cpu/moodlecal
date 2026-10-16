@@ -14,16 +14,18 @@ const REQUEST_TIMEOUT_MS = 20_000;
 
 /** An intentionally safe error: never includes Moodle responses, tokens or credentials. */
 export class MoodleError extends Error {
+  readonly reason: 'network' | 'authentication' | 'permission' | 'upstream';
   readonly retryable: boolean;
   readonly userMessage: string;
   operation?: string;
   warningCodes?: string[];
 
-  constructor(message: string, retryable = false) {
+  constructor(message: string, retryable = false, reason: MoodleError['reason'] = 'upstream') {
     super(message);
     this.name = 'MoodleError';
     this.userMessage = message;
     this.retryable = retryable;
+    this.reason = reason;
   }
 }
 
@@ -204,10 +206,10 @@ export class MoodleClient implements MoodleGateway {
         if (result.exception || result.errorcode || result.error) {
           const code = typeof result.errorcode === 'string' ? result.errorcode : '';
           if (/invalidtoken|expiredtoken|invalidlogin|usernotfullysetup|forcepasswordchange|requireloginerror/i.test(code)) {
-            throw new MoodleError('Your Moodle connection is no longer valid. Please reconnect your account.');
+            throw new MoodleError('Your Moodle connection is no longer valid. Please reconnect your account.',false,'authentication');
           }
           if (/accessexception|nopermission|accessdenied|servicenotavailable|webservice.*disabled/i.test(code)) {
-            throw new MoodleError('Moodle does not allow this API request. Ask the university to check the mobile web service permissions.');
+            throw new MoodleError('Moodle does not allow this API request. Ask the university to check the mobile web service permissions.',false,'permission');
           }
           // Moodle exception text and debugging information may contain secrets.
           throw new MoodleError('Moodle returned an API error. Please try again or reconnect your account.', true);
@@ -221,7 +223,7 @@ export class MoodleClient implements MoodleGateway {
       return data;
     } catch (error) {
       if (error instanceof MoodleError) throw error;
-      throw new MoodleError('Moodle could not be reached. Please try again.', true);
+      throw new MoodleError('Moodle could not be reached. Please try again.', true,'network');
     }
   }
 
