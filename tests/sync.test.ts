@@ -40,6 +40,27 @@ test('connect encrypts credentials, consumes link, and silently baselines existi
   const notices=f.store.pending(f.now);assert.equal(notices.length,1);assert.match(notices[0].text,/Moodle connected/);
   await assert.rejects(f.service.connect(raw,'other-token'),/expired/);
 });
+test('connection succeeds with an explicit warning when Moodle omits submission status data',async t=>{
+  const f=fixture();t.after(()=>f.store.close());
+  f.snapshot={...f.snapshot,warnings:['Moodle did not return assignment submission statuses or grades. Published deadlines may be incomplete.']};
+  await f.connect();
+  const notice=f.store.pending(f.now)[0].text;
+  assert.match(notice,/Moodle connected/);assert.match(notice,/submission statuses or grades/);
+});
+test('partial sync marks assignment status unknown and preserves last-known state plus cached quiz and calendar items',async t=>{
+  const f=fixture();t.after(()=>f.store.close());
+  const quiz:Item={key:'quiz:22',courseId:10,courseName:'Economics',kind:'quiz',title:'Exam',description:'',url:'https://moodle.uwed.uz/mod/quiz/view.php?id=22',modifiedAt:1,dueAt:2_000_000_200,startsAt:null,endsAt:null,completed:false,files:[]};
+  const event:Item={key:'event:23',courseId:10,courseName:'Economics',kind:'event',title:'Seminar',description:'',url:'https://moodle.uwed.uz/calendar/view.php?id=23',modifiedAt:1,dueAt:null,startsAt:2_000_000_300,endsAt:null,completed:false,files:[]};
+  const submitted={...item('Essay',true),submissionStatus:'submitted_graded' as const,grade:'90 / 100'};
+  f.snapshot={...f.snapshot,items:[submitted,quiz,event]};await f.connect();await f.service.deliver();
+  f.snapshot={...f.snapshot,items:[{...item('Essay',false),dueAt:2_000_000_100,submissionStatus:'unknown',grade:null}],warnings:['Moodle did not return assignment submission statuses or grades. Published deadlines may be incomplete.']};
+  const report=await f.service.refresh(f.s.id);const saved=f.store.rawItems(f.s.id);
+  const assignment=saved.find(value=>value.key==='assignment:1')!;
+  assert.equal(assignment.submissionStatus,'unknown');assert.equal(assignment.completed,true);assert.equal(assignment.grade,'90 / 100');assert.equal(assignment.dueAt,2_000_000_000);
+  assert.ok(saved.some(value=>value.key==='quiz:22'));assert.ok(saved.some(value=>value.key==='event:23'));
+  assert.match(report,/submission statuses or grades/);assert.doesNotMatch(report,/Removed assignment|submission status changed/);
+  f.service.reminders();assert.equal(f.store.pending(f.now).length,0);
+});
 test('snapshot changes are durable and unchanged polls do not duplicate notifications; reverted edits notify',async t => {
   const f=fixture();t.after(()=>f.store.close());await f.connect();await f.service.deliver();
   f.now+=300;f.snapshot.items=[item('Updated essay')];await f.service.sync(f.s.id);

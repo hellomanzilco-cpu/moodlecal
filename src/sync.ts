@@ -6,7 +6,7 @@ import type { Item, Messenger, MoodleGateway, MoodleProfile, ConnectionProgress 
 import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
-import { MoodleError } from './moodle.ts';
+import { ASSIGNMENT_STATUS_WARNING, MoodleError } from './moodle.ts';
 import { assignmentLink } from './assignment-session.ts';
 import {ProfileSharingService} from './profile-sharing.ts';
 import {SyncLimitError} from './sync-quota.ts';
@@ -90,10 +90,10 @@ export class SyncService {
     }
     return `${this.publicUrl}/calendar/${raw}.ics`;
   }
-  async connect(linkToken: string, moodleToken: string,progress?:ConnectionProgress): Promise<void> {
+  async connect(linkToken: string, moodleToken: string,progress?:ConnectionProgress): Promise<string[]> {
     const hash = hashSecret(linkToken); const original = this.store.byLink(hash,this.now());
     if (!original) throw new Error('Connection link expired. Send /connect in Telegram.');
-    await this.locked(original.id, async () => {
+    return this.locked(original.id, async () => {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
       if(!this.store.consumeSync(original.telegramId,this.now()))throw new SyncLimitError();
       const snapshot = await this.moodle.snapshot(moodleToken,this.now(),false,progress);
@@ -105,8 +105,10 @@ export class SyncService {
         this.store.patchStudent(original.id,{moodleCipher:this.vault.seal(moodleToken,`moodle:${original.id}`),linkHash:null,linkExpires:null,calendarHash:null,calendarCipher:null,paused:false,initialized:false});
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
         this.store.metric('connection_success',this.now());
-        this.store.enqueue(original.id,`connected:${hash}`,'✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
+        const statusWarning=snapshot.warnings.find(warning=>warning.startsWith(ASSIGNMENT_STATUS_WARNING));
+        this.store.enqueue(original.id,`connected:${hash}`,'✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.'+(statusWarning?'\n\n⚠️ '+statusWarning:''));
       });
+      return snapshot.warnings;
     });
   }
   async sync(id: number, manual=true): Promise<void> {
@@ -160,9 +162,25 @@ export class SyncService {
         if (!latest || latest.moodleCipher!==s.moodleCipher || (latest.paused && !manual)) return null;
         const previousItems=this.store.rawItems(id);
         const previous = new Map(previousItems.map(i => [i.key,i]));
+        const statusUnavailable=snapshot.warnings.some(warning=>warning.startsWith(ASSIGNMENT_STATUS_WARNING));
+        if(statusUnavailable){
+          // Moodle did not verify submission state. Keep cached completion/grade/
+          // deadline values as last-known, mark status unknown, and retain quiz
+          // and calendar rows that were skipped after the endpoint failed.
+          for(const item of snapshot.items){
+            const prior=previous.get(item.key);
+            if(item.kind==='assignment'&&prior){item.completed=prior.completed;item.grade=prior.grade;item.dueAt=prior.dueAt;item.submissionStatus='unknown';}
+          }
+          const freshKeys=new Set(snapshot.items.map(item=>item.key));
+          snapshot.items.push(...previousItems.filter(item=>(item.kind==='quiz'||item.kind==='event')&&!freshKeys.has(item.key)));
+        }
         const muted = new Set(this.store.courses(id).filter(c => c.muted).map(c => c.id));
         if(s.initialized && previousItems.some(item=>item.key.startsWith('assignment:')) && snapshot.warnings.some(w=>w.startsWith('Assignment details and deadlines are unavailable'))){const error=new MoodleError('Assignment API access was lost. The last complete snapshot is preserved.',false,'permission');error.operation='mod_assign_get_assignments';throw error;}
-        const allChanges=s.initialized ? [...findCourseChanges(this.store.courses(id),snapshot.courses),...findChanges(previousItems,snapshot.items,s.timezone)] : [];
+        const comparisonItems=statusUnavailable?snapshot.items.map(item=>{
+          const prior=previous.get(item.key);
+          return item.kind==='assignment'&&prior?{...item,completed:prior.completed,grade:prior.grade,dueAt:prior.dueAt,submissionStatus:prior.submissionStatus}:item;
+        }):snapshot.items;
+        const allChanges=s.initialized ? [...findCourseChanges(this.store.courses(id),snapshot.courses),...findChanges(previousItems,comparisonItems,s.timezone)] : [];
         const changes=manual?allChanges:allChanges.filter(change=>!muted.has(change.courseId??0));
         const notices: {key:string; text:string}[] = [];
         if(notify && !latest.paused)for(const change of changes){
@@ -189,7 +207,7 @@ export class SyncService {
     for (const s of this.store.db.prepare('SELECT id FROM students WHERE moodleCipher IS NOT NULL AND paused=0').all()) {
       const id=Number(s.id); const student=this.store.getStudent(id)!;
       // Do not remind from stale data: a newly submitted assignment might have been missed.
-      if (!student.lastSyncAt || now-student.lastSyncAt>this.pollSeconds*3 || student.lastError?.startsWith('Sync failed')) continue;
+      if (!student.lastSyncAt || now-student.lastSyncAt>this.pollSeconds*3 || student.lastError?.startsWith('Sync failed') || student.lastError?.startsWith(ASSIGNMENT_STATUS_WARNING)) continue;
       for (const item of priorityItems(this.store.items(id),now)) {
         if(item.dueAt===null) continue;
         const remaining=item.dueAt!-now;

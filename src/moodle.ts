@@ -13,6 +13,7 @@ const ATTEMPTS = 'mod_quiz_get_user_attempts';
 const CALENDAR = 'core_calendar_get_calendar_events';
 const GROUPS = 'core_group_get_course_user_groups';
 const REQUEST_TIMEOUT_MS = 20_000;
+export const ASSIGNMENT_STATUS_WARNING='Moodle did not return assignment submission statuses or grades.';
 
 /** An intentionally safe error: never includes Moodle responses, tokens or credentials. */
 export class MoodleError extends Error {
@@ -390,6 +391,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
 
     const assignmentIds = new Set<number>();
     const quizIds = new Set<number>();
+    let submissionStatusUnavailable=false;
     progress?.('assignments');
     if (courseIds.length && hasAssignments) {
       let restricted=0;
@@ -406,7 +408,22 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       const submissionStatuses=new Map<number,RecordValue>();
       if(hasSubmissions){
         const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
-        await mapConcurrent(visible,3,async assignment=>{const assignmentId=id(assignment.id);submissionStatuses.set(assignmentId,object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId})));});
+        await mapConcurrent(visible,3,async assignment=>{
+          if(submissionStatusUnavailable)return;
+          const assignmentId=id(assignment.id);
+          try{submissionStatuses.set(assignmentId,object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId})));}
+          catch(error){
+            // Keep useful course and deadline data when Moodle's separate
+            // submission/grade endpoint is temporarily unavailable. Never infer
+            // a student's submitted state or grade from missing API data.
+            if(error instanceof MoodleError&&(error.reason==='network'||error.reason==='permission')){submissionStatusUnavailable=true;return;}
+            throw error;
+          }
+        });
+        if(submissionStatusUnavailable){
+          submissionStatuses.clear();
+          warnings.push(`${ASSIGNMENT_STATUS_WARNING} Courses and published deadlines were saved, but submitted/graded labels and individual deadline extensions may be incomplete. Quiz attempts and calendar events were not refreshed. Check Moodle directly and try 🔄 Sync later.`);
+        }
       }
       for (const rawCourse of list(result.courses)) {
         const courseData = object(rawCourse);
@@ -424,8 +441,8 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
           let grade: string | null=null;
           let lastAttempt: RecordValue | undefined;
           if (hasSubmissions) {
-            const status = submissionStatuses.get(assignmentId)!;
-            if (status.lastattempt !== undefined) {
+            const status = submissionStatuses.get(assignmentId);
+            if (status?.lastattempt !== undefined) {
               const last = object(status.lastattempt);
               lastAttempt = last;
               const extension = timestamp(last.extensionduedate);
@@ -470,7 +487,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       }
     }
 
-    if (courseIds.length && hasQuizzes) {
+    if (courseIds.length && hasQuizzes && !submissionStatusUnavailable) {
       const result = object(await this.call(token, QUIZZES, { courseids: courseIds }));
       for (const rawQuiz of list(result.quizzes)) {
         const quiz = object(rawQuiz);
@@ -504,7 +521,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     }
 
     progress?.('calendar');
-    if (hasCalendar) {
+    if (hasCalendar && !submissionStatusUnavailable) {
       const groupIds = new Set<number>();
       if (available.has(GROUPS)) {
         const result = object(await this.call(token, GROUPS, { courseid: 0, userid: identity.userId }));

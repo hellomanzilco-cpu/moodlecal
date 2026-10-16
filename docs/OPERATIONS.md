@@ -38,6 +38,8 @@ The legacy `POLL_SECONDS` value remains for retry/freshness calculations. It doe
 
 Each Telegram student can start at most **five full Moodle syncs per Tashkent calendar day**. Connect/reconnect snapshots count toward that limit; a failed attempt counts because it still uses upstream capacity. A sixth attempt is refused before contacting Moodle. Profile, assignment-detail, and task-file views remain separate from this full-sync allowance and have their own bounded request and transfer limits. The bot shows remaining syncs in Status.
 
+If Moodle's `mod_assign_get_submission_status` request times out or is denied, the app keeps course and assignment data, marks submission status unknown, and warns that grades, individual extensions, quizzes, and calendar events could not be refreshed. Existing students retain their last-known completion, grade, and deadline values plus cached quiz/calendar items; reminders pause until a later successful check. Students should verify their status and deadlines in Moodle during this condition.
+
 Restrict `.env`, reports, database files, and backups to the operator. Disable request-body logging and redact calendar bearer-secret paths in proxy logs. Do not put passwords, bot tokens, or signing secrets in URLs, shell history, or tickets.
 
 Install locked dependencies with `npm ci`; run `npm run check` and `npm test` before deploying a change. Build with `docker compose up --build -d`. Keep a backup and previous release before schema changes. Run plugin PHPUnit tests in a compatible Moodle/PHP test environment, then stage the integration; application tests do not prove Moodle plugin compatibility.

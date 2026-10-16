@@ -45,14 +45,16 @@ function fixture(overrides: Record<string, unknown> = {}, functions = [...requir
     ...overrides,
   };
   const requests: Request[] = [];
+  const failures=new Set<string>();
   const fake: typeof fetch = async (input, options = {}) => {
     const request = { url: String(input), options, parameters: new URLSearchParams(String(options.body)) };
     requests.push(request);
     const functionName = request.parameters.get('wsfunction') ?? 'login';
     assert.ok(Object.hasOwn(responses, functionName), `Unexpected Moodle call ${functionName}`);
+    if(failures.has(functionName))throw new Error('upstream network failure');
     return Response.json(responses[functionName]);
   };
-  return { client: new MoodleClient(site, fake), requests, responses };
+  return { client: new MoodleClient(site, fake), requests, responses,fail:(functionName:string)=>failures.add(functionName) };
 }
 
 test('normalizes student deadlines, resources and group calendar without duplicate activity events', async () => {
@@ -84,6 +86,17 @@ test('normalizes student deadlines, resources and group calendar without duplica
   assert.equal(calendar.get('events[groupids][0]'), '30');
   assert.equal(calendar.get('options[timestart]'), String(now - 7 * 86400));
   assert.equal(calendar.get('options[timeend]'), String(now + 180 * 86400));
+});
+
+test('temporary submission-status outage preserves courses and deadlines while marking statuses unknown',async()=>{
+  const f=fixture();f.fail('mod_assign_get_submission_status');
+  const result=await f.client.snapshot(token,now);
+  const assignment=result.items.find(item=>item.key==='assignment:21')!;
+  assert.equal(result.courses.length,1);assert.equal(assignment.dueAt,now+3600);assert.equal(assignment.submissionStatus,'unknown');
+  assert.equal(assignment.grade,null);assert.equal(assignment.availability,'unknown');
+  assert.ok(result.warnings.some(warning=>warning.includes('submission statuses or grades')));
+  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
+  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
 });
 
 test('same-name same-size file replacements keep their changed modification timestamp', async () => {
