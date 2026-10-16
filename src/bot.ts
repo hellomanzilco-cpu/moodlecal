@@ -43,7 +43,7 @@ const MAIN_BUTTONS = [
   ['📚 My courses', '🔄 Sync'],
   ['🧭 More', '⚙️ Settings'],
 ];
-const ASSIGNMENT_BUTTONS = [['⏳ Next deadlines', '🕓 Later / undated'], ['📨 Awaiting grades', '✅ Graded'], ['⬅️ Main menu']];
+const ASSIGNMENT_BUTTONS = [['⏳ Next deadlines', '🕓 Later / undated'], ['📨 Awaiting grades', '✅ Graded'], ['⚠️ Unverified'], ['⬅️ Main menu']];
 const BUTTON_COMMANDS: Record<string, string> = {
   '🏠 Today': 'today', '📅 This week': 'week', '🎯 Priorities': 'priorities',
   '📚 My courses': 'courses', '📝 Assignments': 'assignments', '📖 Prepare': 'preparemenu',
@@ -52,6 +52,7 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '🔄 Sync now': 'sync', '🔄 Sync':'sync', 'ℹ️ Status': 'status', '🔒 Disconnect': 'disconnectmenu',
   '⬅️ Main menu': 'menu', '🗑 Yes, disconnect': 'confirmdisconnect',
   '⏳ Outstanding': 'outstanding', '📨 Awaiting grades': 'awaiting', '✅ Graded': 'graded',
+  '⚠️ Unverified':'unverified',
   '⏳ Active now': 'outstanding', '🕓 Upcoming / locked': 'upcoming',
   '⏳ Next deadlines':'outstanding','🕓 Later / undated':'upcoming',
   '📖 All courses': 'prepare',
@@ -243,7 +244,7 @@ export class Bot {
     } else if (command === 'preparemenu') {
       menu = student.moodleCipher ? 'prepare' : 'main';
       reply = student.moodleCipher ? '📖 Prepare for class\nChoose a course below. Checklists use Moodle descriptions and links; document contents have not been read.' : await this.command(student, 'prepare', '');
-    } else if (['assignments', 'outstanding', 'upcoming', 'awaiting', 'graded'].includes(command ?? '')) {
+    } else if (['assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified'].includes(command ?? '')) {
       menu = student.moodleCipher ? 'assignments' : 'main';
       reply = await this.command(student, command!, arg);
     } else if (command) {
@@ -355,7 +356,7 @@ export class Bot {
       const quota=this.services.syncAllowance?.(id);
       return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}${quota?`\nDaily full syncs: ${quota.used}/${quota.limit} used · ${quota.remaining} left\nResets: 00:00 Asia/Tashkent`:''}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
     }
-    const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
+    const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
     if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first: tap 🔗 Connect Moodle in the main menu. Never send your password or token in Telegram.';
 
     switch (command) {
@@ -407,11 +408,12 @@ export class Bot {
       case 'outstanding':
       case 'upcoming':
       case 'awaiting':
-      case 'graded': {
+      case 'graded':
+      case 'unverified': {
         const assignments = this.store.items(id).filter(item => item.kind === 'assignment');
         const current=currentAssignmentKeys(assignments,now);
         const currentWork=(item:Item)=>item.dueAt!==null && (current.has(item.key) || item.dueAt<now) && isActionable(item,now);
-        const statuses = { outstanding: 'outstanding', upcoming: 'outstanding', awaiting: 'submitted_ungraded', graded: 'submitted_graded' } as const;
+        const statuses = { outstanding: 'outstanding', upcoming: 'outstanding', awaiting: 'submitted_ungraded', graded: 'submitted_graded', unverified:'unknown' } as const;
         const unknown = assignments.filter(item => !item.submissionStatus || item.submissionStatus === 'unknown');
         const counts = {
           outstanding: assignments.filter(item => item.submissionStatus === 'outstanding' && currentWork(item)).length,
@@ -419,16 +421,16 @@ export class Bot {
           awaiting: assignments.filter(item => item.submissionStatus === 'submitted_ungraded').length,
           graded: assignments.filter(item => item.submissionStatus === 'submitted_graded').length,
         };
-        const summary = `📝 Your assignments\n\n⏳ Next deadlines / overdue: ${counts.outstanding}\n🕓 Later / undated: ${counts.upcoming}\n📨 Awaiting grades: ${counts.awaiting}\n✅ Graded: ${counts.graded}\n\nTotal unfinished: ${counts.outstanding + counts.upcoming}`;
+        const summary = `📝 Your assignments\n\n⏳ Next deadlines / overdue: ${counts.outstanding}\n🕓 Later / undated: ${counts.upcoming}\n📨 Awaiting grades: ${counts.awaiting}\n✅ Graded: ${counts.graded}\n⚠️ Status unverified: ${unknown.length}\n\nTotal unfinished: ${counts.outstanding + counts.upcoming}`;
         const accessLine = (item: Item): string => `\n${item.availability === 'open' ? '🟢 Available now' : item.availability === 'upcoming' ? '🕓 Not open yet' : item.availability === 'closed' ? '⛔ Submissions closed' : item.availability === 'restricted' ? '🔒 Restricted' : '❓ Access unconfirmed'}${item.availableFrom ? `\nOpens: ${formatTime(item.availableFrom, student.timezone)}` : ''}${item.availabilityReason ? `\n${item.availabilityReason}` : ''}`;
-        const unknownNotice = unknown.length ? `\n\n⚠️ Submission status is unavailable for ${unknown.length} assignment${unknown.length === 1 ? '' : 's'}. Check Moodle directly.` : '';
+        const unknownNotice = unknown.length ? `\n\n⚠️ Moodle did not confirm submission status for ${unknown.length} assignment${unknown.length === 1 ? '' : 's'}. Open ⚠️ Unverified to check each task directly. Upload is enabled only when Moodle confirms the current status and your access.` : '';
         if (command === 'assignments') return summary + (assignments.length ? '\n\nChoose a category below.' : '\n\nNo assignments have been synced yet.') + unknownNotice + this.coverage(student);
         const status = statuses[command];
-        const filtered = assignments.filter(item => item.submissionStatus === status && (command === 'outstanding' ? currentWork(item) : command === 'upcoming' ? !currentWork(item) : true)).sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || a.title.localeCompare(b.title));
-        const headings = { outstanding: '⏳ Next deadlines and unfinished overdue work', upcoming: '🕓 Later, undated, or unavailable assignments', awaiting: '📨 Submitted — awaiting grades', graded: '✅ Submitted — graded' };
+        const filtered = assignments.filter(item => command==='unverified'?(!item.submissionStatus||item.submissionStatus==='unknown'):item.submissionStatus === status && (command === 'outstanding' ? currentWork(item) : command === 'upcoming' ? !currentWork(item) : true)).sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || a.title.localeCompare(b.title));
+        const headings = { outstanding: '⏳ Next deadlines and unfinished overdue work', upcoming: '🕓 Later, undated, or unavailable assignments', awaiting: '📨 Submitted — awaiting grades', graded: '✅ Submitted — graded', unverified:'⚠️ Status unverified — check with Moodle' };
         const page=this.page(id,command,arg,filtered);
         this.assignmentButtons.set(id,page.items);
-        return `${headings[command]}\n\n${filtered.length ? page.items.map(item => `${this.itemLine(item, student.timezone)}${item.dueAt === null ? '\nNo published deadline' : ''}${command === 'upcoming' ? accessLine(item) : ''}${command === 'graded' ? `\nGrade: ${item.grade || 'See Moodle for grade details'}` : ''}`).join('\n\n') : 'No assignments in this category.'}${page.footer}${this.services.assignmentLink&&filtered.length?'\n\nTap a 📄 assignment button below to read the task and manage your submission.':''}${unknownNotice}${this.coverage(student)}`;
+        return `${headings[command]}\n\n${filtered.length ? page.items.map(item => `${this.itemLine(item, student.timezone)}${item.dueAt === null ? '\nNo published deadline' : ''}${command === 'upcoming'||command==='unverified' ? accessLine(item) : ''}${command === 'graded' ? `\nGrade: ${item.grade || 'See Moodle for grade details'}` : ''}`).join('\n\n') : 'No assignments in this category.'}${page.footer}${this.services.assignmentLink&&filtered.length?'\n\nTap a 📄 assignment button below to read the task and let Moodle verify its current details.':''}${command==='unverified'?unknownNotice:''}${this.coverage(student)}`;
       }
       case 'done':
       case 'undo': {

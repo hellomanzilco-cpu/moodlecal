@@ -5,9 +5,8 @@ import { MoodleClient, MoodleError, moodleText } from '../src/moodle.ts';
 const site = 'https://moodle.uwed.uz';
 const token = 'student-private-token';
 const now = 1_792_000_000;
-const required = ['core_enrol_get_users_courses', 'core_course_get_contents'];
+const required = ['core_enrol_get_users_courses', 'core_course_get_contents', 'mod_assign_get_assignments', 'mod_assign_get_submission_status'];
 const optional = [
-  'mod_assign_get_assignments', 'mod_assign_get_submission_status',
   'mod_quiz_get_quizzes_by_courses', 'mod_quiz_get_user_attempts',
   'core_calendar_get_calendar_events', 'core_group_get_course_user_groups',
 ];
@@ -33,7 +32,7 @@ function fixture(overrides: Record<string, unknown> = {}, functions = [...requir
       { id: 12, instance: 22, name: 'Term control', modname: 'quiz', uservisible: true, contents: [] },
     ] }],
     mod_assign_get_assignments: { courses: [{ id: 8, assignments: [{ id: 21, cmid: 11, course: 8, name: 'Essay', duedate: now + 3600, cutoffdate: now + 7200, allowsubmissionsfromdate: now - 100, timemodified: 100, intro: '<p>Write about trade.</p>', teamsubmission: 0 }] }], warnings: [] },
-    mod_assign_get_submission_status: { lastattempt: { submission: { status: 'draft' }, extensionduedate: now + 5000, canedit: true, caneditowner: true, cansubmit: false, submissionsenabled: true, locked: false }, warnings: [] },
+    mod_assign_get_submission_status: { lastattempt: { submission: { status: 'draft' }, extensionduedate: now + 5000, graded: false, canedit: true, caneditowner: true, cansubmit: false, submissionsenabled: true, locked: false }, warnings: [] },
     mod_quiz_get_quizzes_by_courses: { quizzes: [{ id: 22, coursemodule: 12, course: 8, name: 'Term control', timeopen: now + 100, timeclose: now + 6000, intro: 'Revise chapter 2.' }], warnings: [] },
     mod_quiz_get_user_attempts: { attempts: [{ id: 7, state: 'finished' }], warnings: [] },
     core_group_get_course_user_groups: { groups: [{ id: 30, courseid: 8 }], warnings: [] },
@@ -88,15 +87,27 @@ test('normalizes student deadlines, resources and group calendar without duplica
   assert.equal(calendar.get('options[timeend]'), String(now + 180 * 86400));
 });
 
-test('temporary submission-status outage preserves courses and deadlines while marking statuses unknown',async()=>{
+test('temporary submission-status outage fails the whole snapshot instead of accepting unknown status',async()=>{
   const f=fixture();f.fail('mod_assign_get_submission_status');
-  const result=await f.client.snapshot(token,now);
-  const assignment=result.items.find(item=>item.key==='assignment:21')!;
-  assert.equal(result.courses.length,1);assert.equal(assignment.dueAt,now+3600);assert.equal(assignment.submissionStatus,'unknown');
-  assert.equal(assignment.grade,null);assert.equal(assignment.availability,'unknown');
-  assert.ok(result.warnings.some(warning=>warning.includes('submission statuses or grades')));
+  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.reason==='network');
   assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
   assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
+});
+
+test('submission-status API errors expose only Moodle’s sanitized error code',async()=>{
+  const f=fixture({mod_assign_get_submission_status:{exception:'moodle_exception',errorcode:'nopermissiontoaccesspage',message:'private Moodle debug response'}});
+  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.apiErrorCode==='nopermissiontoaccesspage'&&!error.message.includes('private Moodle debug response'));
+});
+
+test('a successful but incomplete status response cannot authorize an incomplete snapshot',async()=>{
+  const f=fixture({mod_assign_get_submission_status:{lastattempt:{submission:{status:'new'}},warnings:[]}});
+  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.apiErrorCode==='incomplete_lastattempt');
+});
+
+test('assignment status API is required before course data can be presented as ready',async()=>{
+  const f=fixture({},['core_enrol_get_users_courses','core_course_get_contents','mod_assign_get_assignments']);
+  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.reason==='permission');
+  assert.equal(f.requests.length,1);
 });
 
 test('same-name same-size file replacements keep their changed modification timestamp', async () => {
@@ -116,17 +127,18 @@ test('assignment report distinguishes drafts, awaiting grades, and graded submis
     {lastattempt:{submission:{status:'submitted',attemptnumber:2},graded:false},feedback:{grade:{grade:'90',attemptnumber:1},gradefordisplay:'90 / 100'},expected:'submitted_ungraded',grade:null},
   ];
   for(const {expected,grade,...status} of cases) {
-    const {client}=fixture({mod_assign_get_submission_status:{...status,warnings:[]}});
+    const lastattempt=status.lastattempt as Record<string,unknown>;
+    const {client}=fixture({mod_assign_get_submission_status:{...status,lastattempt:Object.assign({extensionduedate:0,canedit:true,caneditowner:true,cansubmit:false,submissionsenabled:true,locked:false,graded:false},lastattempt),warnings:[]}});
     const result=await client.snapshot(token,now,true);assert.equal(result.items.length,1);
     assert.equal(result.items[0].submissionStatus,expected);assert.equal(result.items[0].grade,grade);
     assert.equal(result.items[0].startsAt,null);assert.equal(result.items[0].endsAt,null);
   }
 });
-test('assignment-only inspection avoids unrelated quiz/calendar endpoints and preserves unknown status',async () => {
-  const {client,requests}=fixture({},required.concat('mod_assign_get_assignments'));
+test('assignment-only inspection verifies assignment status without unrelated quiz/calendar endpoints',async () => {
+  const {client,requests}=fixture({},required);
   const result=await client.snapshot(token,now,true);
-  assert.equal(result.items[0].submissionStatus,'unknown');assert.equal(result.items[0].grade,null);
-  assert.ok(result.warnings.some(w=>w.includes('submission status')));
+  assert.equal(result.items.find(item=>item.kind==='assignment')!.submissionStatus,'outstanding');assert.equal(result.items.find(item=>item.kind==='assignment')!.grade,null);
+  assert.equal(result.warnings.length,0);
   assert.ok(requests.every(r=>!r.parameters.get('wsfunction')?.includes('quiz') && !r.parameters.get('wsfunction')?.includes('calendar')));
 });
 test('permission warnings for modules absent from visible contents are reported without blocking accessible assignments',async () => {
@@ -142,10 +154,9 @@ test('missing optional APIs reports coverage limitations without invoking unavai
   const { client, requests } = fixture({}, required);
   const snapshot = await client.snapshot(token, now);
   assert.equal(snapshot.items.length, 3);
-  assert.ok(snapshot.warnings.some((warning) => warning.includes('Assignment details')));
   assert.ok(snapshot.warnings.some((warning) => warning.includes('Quiz availability')));
   assert.ok(snapshot.warnings.some((warning) => warning.includes('calendar events')));
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 5);
 });
 
 test('API warnings abort the snapshot rather than returning partial data', async () => {
@@ -177,11 +188,11 @@ test('invalid token and missing mandatory capabilities fail before returning ide
 });
 
 test('submitted personal work is completed; team members who still need to submit are incomplete', async () => {
-  const personal = fixture({ mod_assign_get_submission_status: { lastattempt: { submission: { status: 'submitted' } }, warnings: [] } });
+  const personal = fixture({ mod_assign_get_submission_status: { lastattempt: { submission: { status: 'submitted' },extensionduedate:0,graded:false,canedit:true,caneditowner:true,cansubmit:false,submissionsenabled:true,locked:false }, warnings: [] } });
   assert.equal((await personal.client.snapshot(token, now)).items.find((item) => item.kind === 'assignment')!.completed, true);
   const group = fixture({
     mod_assign_get_assignments: { courses: [{ id: 8, assignments: [{ id: 21, cmid: 11, name: 'Team essay', teamsubmission: 1, duedate: now + 3600 }] }], warnings: [] },
-    mod_assign_get_submission_status: { lastattempt: { teamsubmission: { status: 'submitted' }, submissiongroupmemberswhoneedtosubmit: [4] }, warnings: [] },
+    mod_assign_get_submission_status: { lastattempt: { teamsubmission: { status: 'submitted' }, submissiongroupmemberswhoneedtosubmit: [4],extensionduedate:0,graded:false,canedit:true,caneditowner:true,cansubmit:false,submissionsenabled:true,locked:false }, warnings: [] },
   });
   assert.equal((await group.client.snapshot(token, now)).items.find((item) => item.kind === 'assignment')!.completed, false);
 });
@@ -192,8 +203,9 @@ test('malformed advertised API output fails the whole snapshot', async () => {
 });
 
 test('calendar deadline fallback does not assume an assignment is actionable without its access data', async () => {
-  const { client } = fixture({}, [...required, 'core_calendar_get_calendar_events']);
-  const snapshot = await client.snapshot(token, now);
+  const f=fixture({},[...required,'core_calendar_get_calendar_events']);
+  f.responses.mod_assign_get_assignments={courses:[{id:8,assignments:[]}],warnings:[]};
+  const snapshot = await f.client.snapshot(token, now);
   assert.equal(snapshot.items.find((item) => item.key === 'event:40')!.dueAt, now + 3600);
   assert.equal(snapshot.items.find((item) => item.key === 'event:40')!.availability, 'unknown');
   assert.equal(snapshot.items.find((item) => item.key === 'event:41')!.dueAt, now + 6000);
@@ -202,7 +214,7 @@ test('calendar deadline fallback does not assume an assignment is actionable wit
 test('team submission with required individual confirmations stays unfinished when membership status is unknown', async () => {
   const { client } = fixture({
     mod_assign_get_assignments: { courses: [{ id: 8, assignments: [{ id: 21, cmid: 11, name: 'Team essay', teamsubmission: 1, requireallteammemberssubmit: 1, duedate: now + 3600 }] }], warnings: [] },
-    mod_assign_get_submission_status: { lastattempt: { teamsubmission: { status: 'submitted' } }, warnings: [] },
+    mod_assign_get_submission_status: { lastattempt: { teamsubmission: { status: 'submitted' },extensionduedate:0,graded:false,canedit:true,caneditowner:true,cansubmit:false,submissionsenabled:true,locked:false }, warnings: [] },
   });
   assert.equal((await client.snapshot(token, now)).items.find((item) => item.kind === 'assignment')!.completed, false);
 });
@@ -247,13 +259,12 @@ test('assignment access uses evaluated edit permissions rather than final-submit
     { label: 'extension supersedes cutoff', last: {canedit:true,cansubmit:false,extensionduedate:now+100}, assignment:{cutoffdate:now-100}, expected:'open' },
     { label: 'teacher lock', last: {canedit:false,cansubmit:false,locked:true}, expected:'restricted' },
     { label: 'offline activity', last: {submissionsenabled:false,canedit:false,cansubmit:false}, expected:'restricted' },
-    { label: 'missing evaluated access', last: {}, expected:'unknown' },
   ];
   for(const scenario of cases) {
     const f=fixture();
     const assignments=f.responses.mod_assign_get_assignments as {courses:{assignments:Record<string,unknown>[]}[]};
     Object.assign(assignments.courses[0].assignments[0],scenario.assignment ?? {});
-    f.responses.mod_assign_get_submission_status={lastattempt:{submission:{status:'new'},...scenario.last},warnings:[]};
+    f.responses.mod_assign_get_submission_status={lastattempt:Object.assign({submission:{status:'new'},extensionduedate:0,graded:false,canedit:true,caneditowner:true,cansubmit:false,submissionsenabled:true,locked:false},scenario.last),warnings:[]};
     const result=await f.client.snapshot(token,now,true);
     assert.equal(result.items[0].availability,scenario.expected,scenario.label);
     assert.equal(result.items[0].submissionStatus,'outstanding',scenario.label);

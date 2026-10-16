@@ -21,6 +21,7 @@ export class MoodleError extends Error {
   readonly retryable: boolean;
   readonly userMessage: string;
   operation?: string;
+  apiErrorCode?: string;
   warningCodes?: string[];
 
   constructor(message: string, retryable = false, reason: MoodleError['reason'] = 'upstream') {
@@ -224,14 +225,16 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
         const result = object(data);
         if (result.exception || result.errorcode || result.error) {
           const code = typeof result.errorcode === 'string' ? result.errorcode : '';
+          const safeCode=/^[a-zA-Z0-9_-]{1,80}$/.test(code)?code:'unknown';
+          const coded=(error:MoodleError):MoodleError=>{error.apiErrorCode=safeCode;return error;};
           if (/invalidtoken|expiredtoken|invalidlogin|usernotfullysetup|forcepasswordchange|requireloginerror/i.test(code)) {
-            throw new MoodleError('Your Moodle connection is no longer valid. Please reconnect your account.',false,'authentication');
+            throw coded(new MoodleError('Your Moodle connection is no longer valid. Please reconnect your account.',false,'authentication'));
           }
           if (/accessexception|nopermission|accessdenied|servicenotavailable|webservice.*disabled/i.test(code)) {
-            throw new MoodleError('Moodle does not allow this API request. Ask the university to check the mobile web service permissions.',false,'permission');
+            throw coded(new MoodleError('Moodle does not allow this API request. Ask the university to check the mobile web service permissions.',false,'permission'));
           }
           // Moodle exception text and debugging information may contain secrets.
-          throw new MoodleError('Moodle returned an API error. Please try again or reconnect your account.', true);
+          throw coded(new MoodleError('Moodle returned an API error. Please try again or reconnect your account.', true));
         }
         if (result.warnings !== undefined && list(result.warnings).some(w=>!allowWarning?.(object(w)))) {
           const error=new MoodleError('Moodle returned incomplete data. Your saved snapshot will not be replaced.', true);
@@ -343,8 +346,14 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       warnings.push(limitation);
       return false;
     };
-    const hasAssignments = supports(ASSIGNMENTS, 'Assignment details and deadlines are unavailable; only course activity changes are monitored.');
-    const hasSubmissions = supports(SUBMISSIONS, 'Assignment submission status is unavailable; submitted work may remain in priorities.');
+    const requireFunction=(functionName:string,message:string):void=>{
+      if(available.has(functionName))return;
+      const error=new MoodleError(message,false,'permission');error.operation=functionName;throw error;
+    };
+    requireFunction(ASSIGNMENTS,'Moodle has not enabled assignment details for this connection. Ask the university to enable the mobile assignment service.');
+    requireFunction(SUBMISSIONS,'Moodle has not enabled submission status and grade access for this connection. Ask the university to enable the mobile assignment status service.');
+    const hasAssignments = true;
+    const hasSubmissions = true;
     const hasQuizzes = !assignmentsOnly && supports(QUIZZES, 'Quiz availability and deadlines are unavailable; only course activity changes are monitored.');
     const hasAttempts = !assignmentsOnly && supports(ATTEMPTS, 'Quiz attempt status is unavailable; completed quizzes may remain in priorities.');
     const hasCalendar = !assignmentsOnly && supports(CALENDAR, 'Moodle calendar events are unavailable; classes need a personal timetable.');
@@ -391,7 +400,6 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
 
     const assignmentIds = new Set<number>();
     const quizIds = new Set<number>();
-    let submissionStatusUnavailable=false;
     progress?.('assignments');
     if (courseIds.length && hasAssignments) {
       let restricted=0;
@@ -408,22 +416,23 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       const submissionStatuses=new Map<number,RecordValue>();
       if(hasSubmissions){
         const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
-        await mapConcurrent(visible,3,async assignment=>{
-          if(submissionStatusUnavailable)return;
+        await mapConcurrent(visible,1,async assignment=>{
           const assignmentId=id(assignment.id);
-          try{submissionStatuses.set(assignmentId,object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId})));}
-          catch(error){
-            // Keep useful course and deadline data when Moodle's separate
-            // submission/grade endpoint is temporarily unavailable. Never infer
-            // a student's submitted state or grade from missing API data.
-            if(error instanceof MoodleError&&(error.reason==='network'||error.reason==='permission')){submissionStatusUnavailable=true;return;}
-            throw error;
+          const status=object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId}));
+          if(status.lastattempt===undefined&&!bool(assignment.nosubmissions)){
+            const error=new MoodleError('Moodle returned no student submission-status record for an assignment. Check the student role permissions for submission summaries.',false,'permission');
+            error.operation=SUBMISSIONS;error.apiErrorCode='missing_lastattempt';throw error;
           }
+          if(status.lastattempt!==undefined&&!bool(assignment.nosubmissions)){
+            const last=object(status.lastattempt);
+            const required=['graded','submissionsenabled','locked','cansubmit','extensionduedate'];
+            if(required.some(field=>last[field]===undefined)||(last.canedit===undefined&&last.caneditowner===undefined)){
+              const error=new MoodleError('Moodle returned an incomplete student submission-status record. The snapshot was not saved.',true,'upstream');
+              error.operation=SUBMISSIONS;error.apiErrorCode='incomplete_lastattempt';throw error;
+            }
+          }
+          submissionStatuses.set(assignmentId,status);
         });
-        if(submissionStatusUnavailable){
-          submissionStatuses.clear();
-          warnings.push(`${ASSIGNMENT_STATUS_WARNING} Courses and published deadlines were saved, but submitted/graded labels and individual deadline extensions may be incomplete. Quiz attempts and calendar events were not refreshed. Check Moodle directly and try 🔄 Sync later.`);
-        }
       }
       for (const rawCourse of list(result.courses)) {
         const courseData = object(rawCourse);
@@ -487,7 +496,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       }
     }
 
-    if (courseIds.length && hasQuizzes && !submissionStatusUnavailable) {
+    if (courseIds.length && hasQuizzes) {
       const result = object(await this.call(token, QUIZZES, { courseids: courseIds }));
       for (const rawQuiz of list(result.quizzes)) {
         const quiz = object(rawQuiz);
@@ -521,7 +530,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     }
 
     progress?.('calendar');
-    if (hasCalendar && !submissionStatusUnavailable) {
+    if (hasCalendar) {
       const groupIds = new Set<number>();
       if (available.has(GROUPS)) {
         const result = object(await this.call(token, GROUPS, { courseid: 0, userid: identity.userId }));

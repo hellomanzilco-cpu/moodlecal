@@ -148,8 +148,9 @@ test('assignment buttons show Moodle submission status independently of personal
   assert.match(overview, /Next deadlines \/ overdue: 1/);
   assert.match(overview, /Awaiting grades: 1/);
   assert.match(overview, /Graded: 1/);
-  assert.match(overview, /status is unavailable for 1 assignment/);
-  assert.deepEqual(labels(s.sent.at(-1)!.options), ['⏳ Next deadlines', '🕓 Later / undated', '📨 Awaiting grades', '✅ Graded', '⬅️ Main menu']);
+  assert.match(overview, /Status unverified: 1/);
+  assert.match(overview, /Moodle did not confirm submission status for 1 assignment/);
+  assert.deepEqual(labels(s.sent.at(-1)!.options), ['⏳ Next deadlines', '🕓 Later / undated', '📨 Awaiting grades', '✅ Graded', '⚠️ Unverified', '⬅️ Main menu']);
   const outstanding = await s.send(101, '⏳ Outstanding');
   assert.match(outstanding, /Outstanding essay/);
   assert.doesNotMatch(outstanding, /Submitted report|Graded paper|Bob private/);
@@ -160,6 +161,11 @@ test('assignment buttons show Moodle submission status independently of personal
   assert.match(graded, /Graded paper/);
   assert.match(graded, /Grade: 87 \/ 100/);
   assert.doesNotMatch(graded, /Bob private/);
+  s.services.assignmentLink=(studentId,key)=>`https://calendar.test/assignment#${studentId}-${key}`;
+  const unverified=await s.send(101,'⚠️ Unverified');
+  assert.match(unverified,/Unknown task/);assert.match(unverified,/Status unverified/);assert.match(unverified,/Upload is enabled only when Moodle confirms/);
+  assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().filter(button=>button.web_app).length,1);
+  assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().find(button=>button.web_app)!.web_app!.url,/assignment:4/);
 });
 
 test('active and upcoming buttons keep inactive tasks out of priorities, agenda, and preparation', async t => {

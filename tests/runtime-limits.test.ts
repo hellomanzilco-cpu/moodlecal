@@ -56,7 +56,7 @@ test('course and submission checks run with bounded parallelism instead of one l
     if(name==='mod_assign_get_assignments')return Response.json({courses:[1,2,3].map(id=>({id,assignments:assignments(id)})),warnings:[]});
     active++;peak=Math.max(peak,active);await new Promise(resolve=>setTimeout(resolve,2));active--;
     if(name==='core_course_get_contents'){const course=Number(new URLSearchParams(String(options?.body)).get('courseid'));return Response.json([{modules:assignments(course).map(item=>({id:item.cmid,instance:item.id,name:'Task',modname:'assign',uservisible:true}))}]);}
-    if(name==='mod_assign_get_submission_status')return Response.json({lastattempt:{submission:{status:'new'},canedit:true},warnings:[]});
+    if(name==='mod_assign_get_submission_status')return Response.json({lastattempt:{submission:{status:'new'},canedit:true,caneditowner:true,cansubmit:false,graded:false,submissionsenabled:true,locked:false,extensionduedate:0},warnings:[]});
     throw new Error('Unexpected endpoint');
   });
   const snapshot=await client.snapshot('private',1_900_000_000,true);assert.equal(snapshot.items.length,24);assert.ok(peak>1&&peak<=3);
