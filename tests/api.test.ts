@@ -8,6 +8,7 @@ import { createApp } from '../src/api.ts';
 import { loadConfig } from '../src/config.ts';
 import type { MoodleGateway } from '../src/types.ts';
 import { MoodleError } from '../src/moodle.ts';
+import { Script } from 'node:vm';
 
 function fixture() {
   const config=loadConfig({ENCRYPTION_KEY:randomBytes(32).toString('base64'),PUBLIC_URL:'https://planner.test',TELEGRAM_MODE:'webhook',WEBHOOK_SECRET:'a'.repeat(43)});
@@ -19,11 +20,31 @@ function fixture() {
   const s=store.ensureStudent(111,111);const raw=new URLSearchParams(new URL(service.connectLink(s.id)).hash.slice(1)).get('token')!;
   return {config,store,service,app,s,raw,updates,get usedPassword(){return usedPassword;},set fail(value:boolean){fail=value;}};
 }
-test('connection page has no external assets, no bearer secret in HTML, and restrictive browser headers',async t => {
+test('connection page permits only Telegram SDK, hides tokens and declares independent ownership',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
   const response=await f.app.inject({url:'/connect'});assert.equal(response.statusCode,200);
   assert.equal(response.headers['referrer-policy'],'no-referrer');assert.match(String(response.headers['content-security-policy']),/default-src 'none'/);
-  assert.ok(!response.body.includes(f.raw));assert.match(response.body,/history.replaceState/);assert.doesNotMatch(response.body,/<script src=/);
+  assert.ok(!response.body.includes(f.raw));assert.match(response.body,/history.replaceState/);
+  const external=[...response.body.matchAll(/<script[^>]+src="([^"]+)"/g)].map(match=>match[1]);assert.deepEqual(external,['https://telegram.org/js/telegram-web-app.js']);
+  assert.doesNotMatch(response.body,/id="token"|Moodle web service token|Bot token/);assert.match(response.body,/id="username"/);assert.match(response.body,/id="password"/);
+  assert.match(response.body,/Tursunov Sunnatilla/);assert.match(response.body,/not created by or on behalf of UWED/);
+  assert.match(String(response.headers['content-security-policy']),/frame-ancestors https:\/\/web.telegram.org/);assert.equal(response.headers['x-frame-options'],undefined);
+  for(const match of response.body.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g))assert.doesNotThrow(()=>new Script(match[1]));
+});
+test('connection progress belongs to its private attempt, follows actual stages and completes only after saving',async t=>{
+ const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+ let release!:()=>void;let reached!:()=>void;const gate=new Promise<void>(resolve=>release=resolve),started=new Promise<void>(resolve=>reached=resolve);
+ const moodle:MoodleGateway={async login(){return 'private-token';},async identify(){return {userId:1,name:'Student',functions:[]};},async snapshot(_token,_now,_only,progress){progress?.('courses');progress?.('assignments');reached();await gate;return {courses:[],items:[],warnings:[]};}};
+ const service=new SyncService(f.store,new Vault(f.config.encryptionKey),moodle,{async send(){}},f.config.publicUrl,300);
+ const app=createApp(f.config,f.store,service,moodle,async()=>{});t.after(()=>app.close());
+ const attemptId='a'.repeat(43),headers={origin:'https://planner.test'};
+ const pending=app.inject({method:'POST',url:'/api/connect',headers,payload:{linkToken:f.raw,attemptId,username:'student',password:'secret-password',consent:true}}).then(response=>response);
+ await started;
+ const read=(linkToken:string,attempt=attemptId)=>app.inject({method:'POST',url:'/api/connect/status',headers,payload:{linkToken,attemptId:attempt}});
+ assert.equal((await read('b'.repeat(43))).statusCode,404);assert.equal((await read(f.raw,'c'.repeat(43))).statusCode,404);
+ const state=await read(f.raw);assert.equal(state.json().phase,'assignments');assert.equal(state.json().status,'working');assert.equal(state.json().percent,60);
+ assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);assert.doesNotMatch(state.body,/private-token|secret-password|linkHash/);
+ release();assert.equal((await pending).statusCode,200);const complete=await read(f.raw);assert.equal(complete.json().status,'complete');assert.equal(complete.json().percent,100);assert.ok(f.store.getStudent(f.s.id)!.moodleCipher);
 });
 test('connect enforces origin and uses one-time links; password is never returned or stored',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});

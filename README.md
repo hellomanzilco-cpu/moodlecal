@@ -1,6 +1,6 @@
 # Moodle Calendar
 
-A Telegram study assistant for students at **moodle.uwed.uz**. Each student connects their own Moodle account, receives notices about supported course changes and deadlines, and gets a private calendar subscription for Google Calendar, Apple Calendar, or Outlook.
+A Telegram study assistant for students at **moodle.uwed.uz**. Independent third-party application created by **Tursunov Sunnatilla**, not created by or on behalf of UWED. Contact: [@sunnatilla_tursunov](https://t.me/sunnatilla_tursunov). Each student connects their own Moodle account, receives notices about supported course changes and deadlines, and gets a private calendar subscription for Google Calendar, Apple Calendar, or Outlook.
 
 This repository contains the implementation and [delivery plan](docs/PLAN.md). Read-only login and assignment inspection were tested with a real UWED student account on **16 October 2026**. The emoji menu and assignment views are implemented. The university-side event bridge has **not been installed or activated**, and live automatic change notifications have not been validated.
 
@@ -66,17 +66,19 @@ npm test
 npm start
 ```
 
-Open a **private chat** with your bot, send `/start`, and tap **🔗 Connect Moodle**. Follow the short-lived link to the connection page. You can enter an existing Moodle mobile-service token, or enter your Moodle username and password once. The server exchanges those credentials with UWED's HTTPS token endpoint and stores the resulting token encrypted. Passwords are not written to the database and should never be sent in a Telegram message.
+Open a **private chat** with your bot, press Start, and tap **🔗 Connect Moodle**. New students see only this button. With public HTTPS hosting, it opens a private Mini App window inside Telegram. Enter your Moodle username and password and accept the consent checkbox; there is no token field on this screen. The server exchanges those credentials with UWED's HTTPS token endpoint and stores the resulting token encrypted. Passwords are not written to the database and should never be sent in a Telegram message.
+
+An animated tube follows actual server stages: sign-in, courses, assignments, calendar, and saving. It turns green only after the connection is saved, or red on failure. Progress requests read the current connection attempt; they do not initiate additional Moodle checks. Return to Telegram updates the menu based on the saved account connection. The window, welcome, pre-Start description, and bio identify the independent creator and contact.
 
 `localhost` links work only on the computer running the app. To connect from a phone, receive Moodle events, or let a calendar provider fetch feeds, use a public HTTPS address and set `PUBLIC_URL` accordingly. This is required even with Telegram long polling, which only retrieves incoming Telegram messages and never checks Moodle. Plain HTTP is accepted only for local development.
 
 Reconnecting establishes a fresh baseline and clears the previous connection's timetable, completion marks, course preferences, and calendar URL. Tap **🗓 Calendar** again and replace your subscription after reconnecting.
 
-If UWED requires browser SSO, MFA, CAPTCHA, or denies mobile token creation, the username/password method may fail. Use an authorized existing mobile-service token if available; a university-approved connection method may otherwise be necessary. The project does not bypass authentication controls.
+If UWED requires browser SSO, MFA, CAPTCHA, or denies mobile token creation, the username/password method may fail. An authorized existing mobile-service token can still be used by the local operator inspection tools; it is not exposed in the student sign-in form. A university-approved connection method may otherwise be necessary. The project does not bypass authentication controls.
 
 ## Student menu
 
-Press Start to open the persistent keyboard. Connected students see six buttons: Today, Assignments, My courses, Sync, More, and Settings. More contains This week, Priorities, Prepare, Calendar, Recent updates, and My timetable. Settings contains alerts, connection, status, help, and time zone. New students see Connect Moodle and Help. Return with **⬅️ Main menu**. Task lists show six items per page with Previous / Next buttons. The full introduction appears before Start; the chat opens with a short welcome.
+Press Start to open the persistent keyboard. Connected students see six buttons: Today, Assignments, My courses, Sync, More, and Settings. More contains This week, Priorities, Prepare, Calendar, Recent updates, and My timetable. Settings contains alerts, connection, status, help, and time zone. New students see only Connect Moodle. Return with **⬅️ Main menu**. Task lists show six items per page with Previous / Next buttons. The full introduction appears before Start; the chat opens with a short welcome.
 
 | Button | Action |
 | --- | --- |
@@ -90,7 +92,7 @@ Press Start to open the persistent keyboard. Connected students see six buttons:
 | 📰 Recent updates | Read your saved website change history. |
 | 🗓 Calendar | Your private calendar subscription URL. |
 | ⚙️ Settings | Alerts, time zone, connection status, reconnect, help, and disconnect. |
-| 🔗 Connect Moodle | A temporary private browser connection link. |
+| 🔗 Connect Moodle | A temporary private sign-in window inside Telegram. |
 
 Under **📝 Assignments**, choose **⏳ Next deadlines**, **🕓 Later / undated**, **📨 Awaiting grades**, or **✅ Graded**. The nearest future deadline in each course determines its current assignment group; tied deadlines stay together, and early submission does not advance the next group before that deadline passes. Accessible unfinished overdue work remains visible. This is a planning rule, not proof that a teacher released an assignment. Drafts remain outstanding; a zero grade counts as graded. Missing access information is reported without guessing. Personal done marks do not submit work or modify grades.
 

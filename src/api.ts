@@ -9,12 +9,16 @@ import type { SyncService } from './sync.ts';
 import type { MoodleGateway } from './types.ts';
 import { MoodleError } from './moodle.ts';
 import { syncFailure } from './sync-errors.ts';
+import { connectionPage } from './connect-page.ts';
+import { CONNECTION_PHASES } from './connection-progress.ts';
+import type { ConnectionState } from './connection-progress.ts';
+import type { ConnectionStage } from './types.ts';
 
-function escapeHtml(value: string) { return value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!)); }
 export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>) {
   // Access logs are disabled: feed URLs and linking requests contain bearer secrets.
   const app=Fastify({logger:false,bodyLimit:16*1024,requestTimeout:30000});
   const rates=new Map<string,{count:number;expires:number}>();
+  const connections=new Map<string,ConnectionState>();
   app.addHook('onRequest',async (_request,reply) => {
     reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer')
       .header('X-Content-Type-Options','nosniff').header('X-Frame-Options','DENY');
@@ -29,30 +33,21 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
   app.get('/',async (_request,reply) => reply.type('text/html').send('<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Moodle Calendar</title><h1>Moodle Calendar</h1><p>Open your Moodle Calendar bot in Telegram and send /connect to link your student account.</p></html>'));
   app.get('/connect',async (_request,reply) => {
     const nonce=newSecret();
-    reply.header('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`);
-    return reply.type('text/html; charset=utf-8').send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect · Moodle Calendar</title>
-<style nonce="${nonce}">*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#18283d;font:16px/1.6 system-ui,sans-serif}main{max-width:540px;margin:6vh auto;padding:32px;background:white;border:1px solid #dce4ed;border-radius:20px}h1{font-size:28px;line-height:1.2}label{display:block;margin:18px 0 5px}input,button{width:100%;padding:12px;border:1px solid #a9b7c9;border-radius:8px;font:inherit}button{background:#175c4c;color:white;margin-top:24px;cursor:pointer}small{color:#52627a}details{margin-top:20px}#result{white-space:pre-wrap}.consent{display:flex;gap:10px;align-items:flex-start}.consent input{width:auto;margin-top:7px}@media(max-width:600px){main{margin:16px;padding:24px}}</style></head>
-<body><main><small>MOODLE CALENDAR · PRIVATE CONNECTION</small><h1>Your classes, in one place.</h1><p>Connect your student account at <strong>${escapeHtml(new URL(config.moodleUrl).hostname)}</strong>.</p>
-<p>Only connect through a Moodle Calendar operator you trust. A Moodle token grants the service access to your account. It is encrypted in storage; no Moodle password is stored.</p>
-<form id="form"><label for="token">Moodle web service token</label><input id="token" type="password" autocomplete="off" maxlength="512"><small>Use your own token if the university provides one.</small>
-<details><summary>Connect using your Moodle username and password</summary><p>Your credentials are sent over HTTPS to Moodle once to obtain a token. This may not work with SSO or university restrictions.</p><label for="username">Username</label><input id="username" autocomplete="username" maxlength="256"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" maxlength="512"></details>
-<label class="consent"><input id="consent" type="checkbox" required><span>I agree to connect my account and let Moodle Calendar read my courses, tasks, submission statuses and visible grades.</span></label>
-<button type="submit" id="submit">Connect Moodle</button></form><p id="result" role="status"></p><p><a id="telegram" href="https://t.me/calmoodlebot?start=connected" hidden>✅ Return to Telegram</a></p><p><a href="${escapeHtml(config.moodleUrl)}/login/index.php" target="_blank" rel="noopener noreferrer">Open UWED Moodle</a></p><small>Your token is encrypted. Link expires after 15 minutes. Use Settings → Disconnect in Telegram to remove your saved account.</small></main>
-<script nonce="${nonce}">
-const linkToken=new URLSearchParams(location.hash.slice(1)).get('token');history.replaceState(null,'','/connect');
-const form=document.getElementById('form'),result=document.getElementById('result'),button=document.getElementById('submit');
-if(!linkToken){result.textContent='Open a fresh connection link from /connect in Telegram.';button.disabled=true;}
-form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;result.textContent='Connecting and syncing your courses…';
-const token=document.getElementById('token'),username=document.getElementById('username'),password=document.getElementById('password');
-try{const response=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linkToken,token:token.value.trim(),username:username.value.trim(),password:password.value,consent:document.getElementById('consent').checked})});
-const data=await response.json();result.textContent=response.ok?'Connected. Return to Telegram to open your courses and assignments.':data.error;
-token.value='';password.value='';if(response.ok){form.hidden=true;document.getElementById('telegram').hidden=false;}else{button.disabled=false;}}
-catch{result.textContent='Connection interrupted. Please try again.';button.disabled=false;password.value='';}});
-</script></body></html>`);
+    reply.removeHeader('X-Frame-Options');
+    reply.header('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}' https://telegram.org; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org`);
+    return reply.type('text/html; charset=utf-8').send(connectionPage(nonce,config.moodleUrl));
   });
-  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string;consent:boolean}}>('/api/connect',{
-    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','consent'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512},consent:{type:'boolean',const:true}}}},
+  app.post<{Body:{linkToken:string;attemptId:string}}>('/api/connect/status',{
+    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','attemptId'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},attemptId:{type:'string',pattern:'^[A-Za-z0-9_-]{43}$'}}}},
+  },async(request,reply)=>{
+    if(request.headers.origin!==new URL(config.publicUrl).origin)return reply.code(403).send({error:'Open the connection window from Telegram.'});
+    const state=connections.get(hashSecret(request.body.attemptId));
+    if(!state || state.expires<=Date.now()/1000 || !safeEqual(state.linkHash,hashSecret(request.body.linkToken)))return reply.code(404).send({error:'Connection status unavailable.'});
+    const {phase,percent,label,status,error}=state;
+    return {phase,percent,label,status,...(error?{error}:{} )};
+  });
+  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string;consent:boolean;attemptId?:string}}>('/api/connect',{
+    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','consent'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512},consent:{type:'boolean',const:true},attemptId:{type:'string',pattern:'^[A-Za-z0-9_-]{43}$'}}}},
   },async (request,reply) => {
     if (request.headers.origin!==new URL(config.publicUrl).origin) return reply.code(403).send({error:'Open the connection page from your Telegram link.'});
     const now=Math.floor(Date.now()/1000); const {linkToken}=request.body;
@@ -62,16 +57,26 @@ catch{result.textContent='Connection interrupted. Please try again.';button.disa
     if (rate && rate.expires>now && rate.count>=6) return reply.code(429).send({error:'Too many attempts. Request a fresh /connect link.'});
     rates.set(rateKey,{count:rate && rate.expires>now ? rate.count+1:1,expires:now+900});
     if (!store.byLink(rateKey,now)) return reply.code(400).send({error:'Connection link expired. Send /connect in Telegram.'});
+    for(const [key,state] of connections)if(state.expires<=now)connections.delete(key);
+    const attemptKey=request.body.attemptId?hashSecret(request.body.attemptId):null;
+    if(attemptKey && connections.has(attemptKey))return reply.code(409).send({error:'This connection attempt is already being processed. Check its status before retrying.'});
+    if(connections.size>=5000)return reply.code(429).send({error:'Please try again later.'});
+    const report=(phase:ConnectionStage)=>{if(attemptKey)connections.set(attemptKey,{phase,...CONNECTION_PHASES[phase],status:'working',linkHash:rateKey,expires:now+900});};
+    const failed=(error:string)=>{const state=attemptKey?connections.get(attemptKey):null;if(state){state.status='failed';state.error=error;state.label='Could not connect.';}};
     try {
+      report('authenticating');
       let token=request.body.token?.trim();
       if (!token) {
-        if (!request.body.username || !request.body.password) return reply.code(400).send({error:'Enter a Moodle token or your username and password.'});
+        if (!request.body.username || !request.body.password){failed('Enter your Moodle username and password.');return reply.code(400).send({error:'Enter your Moodle username and password.'});}
         token=await moodle.login(request.body.username,request.body.password);
       }
-      await service.connect(linkToken,token);
+      await service.connect(linkToken,token,report);
+      const state=attemptKey?connections.get(attemptKey):null;
+      if(state){state.percent=100;state.status='complete';state.label='You’re connected.';state.expires=now+1200;}
       return {ok:true};
     } catch(error) {
-      if(error instanceof MoodleError)return reply.code(error.reason==='network'?503:400).send({error:syncFailure(error),code:error.reason});
+      if(error instanceof MoodleError){const message=error.reason==='authentication'?'Moodle did not accept this sign-in. Check your Moodle username and password.':syncFailure(error);failed(message);return reply.code(error.reason==='network'?503:400).send({error:message,code:error.reason});}
+      failed('Moodle could not be connected. Try again with a fresh connection link. Your previous data is preserved.');
       return reply.code(400).send({error:'Moodle could not be connected. Check your credentials and link expiry. Student web service permissions may need university IT support. Your previous data is preserved.'});
     } finally {
       request.body.password='';request.body.token='';

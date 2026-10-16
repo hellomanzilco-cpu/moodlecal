@@ -183,6 +183,7 @@ test('bot accepts only a real student in their private chat', async t => {
   assert.equal(s.sent.length, 1);
   assert.deepEqual(s.calls.connect, [s.store.byTelegram(101)!.id]);
   assert.match(s.sent[0].text, /Do not forward/);
+  assert.ok(s.sent[0].options!.reply_markup!.keyboard[0][0].web_app);
 });
 
 test('bot remembers successful updates and retries failed delivery', async t => {
@@ -407,7 +408,23 @@ test('assignment pages stay concise, support both directions and do not expose a
  assert.match(await s.send(101,'⬅️ Previous page'),/Task 00/);
  await s.send(101,'⬅️ Main menu');assert.ok(!labels(s.sent.at(-1)!.options).includes('➡️ Next page'));
 });
-test('new students see only connection and help, with no lengthy command list',async t=>{
+test('new students see only a native Connect window and independent-author disclosure',async t=>{
  const s=setup(t);const welcome=await s.send(101,'/start');assert.ok(welcome.length<250);assert.doesNotMatch(welcome,/\/class|\/mute/);
- assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','❓ Help']);
+ assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ assert.match(welcome,/Tursunov Sunnatilla/);assert.match(welcome,/Not created by UWED/);assert.match(welcome,/@sunnatilla_tursunov/);
+ assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
+});
+test('Mini App return refreshes the menu without trusting the payload for authorization',async t=>{
+ const s=setup(t);
+ const payload=(id:number)=>({update_id:id,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'connected'}),button_text:'🔗 Connect Moodle'}}});
+ await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
+ s.connected(101);await s.bot.handle(payload(101));assert.ok(labels(s.sent.at(-1)!.options).includes('🔄 Sync'));
+});
+test('reconnection opens a fresh native window and unconnected menus keep only Connect',async t=>{
+ const s=setup(t);
+ await s.send(101,'/start');await s.send(101,'⚙️ Settings');assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ s.connected(101);await s.send(101,'🔗 Reconnect Moodle');
+ assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','⬅️ Main menu']);
+ assert.ok(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app);
+ const generated=s.calls.connect.length;await s.send(101,'⬅️ Main menu');assert.equal(s.calls.connect.length,generated);
 });

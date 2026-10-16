@@ -11,3 +11,4 @@ coverage/
 *.pem
 *.key
 .railway/
+/images.png

@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import { Store } from './store.ts';
 import { Vault, hashSecret, newSecret } from './security.ts';
 import { formatTime, priorityItems, isActionable } from './planning.ts';
-import type { Item, Messenger, MoodleGateway } from './types.ts';
+import type { Item, Messenger, MoodleGateway, ConnectionProgress } from './types.ts';
 import { findChanges, fingerprint, formatChanges } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
@@ -69,13 +69,14 @@ export class SyncService {
     }
     return `${this.publicUrl}/calendar/${raw}.ics`;
   }
-  async connect(linkToken: string, moodleToken: string): Promise<void> {
+  async connect(linkToken: string, moodleToken: string,progress?:ConnectionProgress): Promise<void> {
     const hash = hashSecret(linkToken); const original = this.store.byLink(hash,this.now());
     if (!original) throw new Error('Connection link expired. Send /connect in Telegram.');
     await this.locked(original.id, async () => {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
-      const snapshot = await this.moodle.snapshot(moodleToken,this.now());
+      const snapshot = await this.moodle.snapshot(moodleToken,this.now(),false,progress);
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
+      progress?.('saving');
       this.store.transaction(() => {
         // Reconnecting can use a different Moodle identity: remove all previous account data.
         for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);

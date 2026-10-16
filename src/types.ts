@@ -26,6 +26,8 @@ export interface Item {
   files?: { name: string; size: number; modifiedAt: number }[];
 }
 export interface Snapshot { courses: Course[]; items: Item[]; warnings: string[] }
+export type ConnectionStage = 'authenticating' | 'courses' | 'assignments' | 'calendar' | 'saving';
+export type ConnectionProgress = (stage:ConnectionStage)=>void;
 export interface Identity { userId: number; name: string; functions: string[] }
 export interface Student {
   id: number; telegramId: number; chatId: number; timezone: string;
@@ -42,10 +44,10 @@ export interface OutboxEntry { id: number; studentId: number; chatId: number; te
 export interface MoodleGateway {
   identify(token: string): Promise<Identity>;
   login(username: string, password: string): Promise<string>;
-  snapshot(token: string, now: number): Promise<Snapshot>;
+  snapshot(token: string, now: number, assignmentsOnly?:boolean, progress?:ConnectionProgress): Promise<Snapshot>;
 }
 export interface ReplyMarkup {
-  keyboard: {text:string}[][];
+  keyboard: {text:string;web_app?:{url:string}}[][];
   resize_keyboard?:boolean;
   is_persistent?:boolean;
   one_time_keyboard?:boolean;

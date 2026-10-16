@@ -1,4 +1,4 @@
-import type { Course, Identity, Item, MoodleGateway, Snapshot } from './types.ts';
+import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress } from './types.ts';
 
 type RecordValue = Record<string, unknown>;
 type Parameter = string | number | boolean | Parameter[] | { [key: string]: Parameter };
@@ -270,7 +270,7 @@ export class MoodleClient implements MoodleGateway {
     } catch { return fallback; }
   }
 
-  async snapshot(token: string, now: number, assignmentsOnly=false): Promise<Snapshot> {
+  async snapshot(token: string, now: number, assignmentsOnly=false,progress?:ConnectionProgress): Promise<Snapshot> {
     const identity = await this.identify(token);
     const available = new Set(identity.functions);
     const warnings: string[] = [];
@@ -285,6 +285,7 @@ export class MoodleClient implements MoodleGateway {
     const hasAttempts = !assignmentsOnly && supports(ATTEMPTS, 'Quiz attempt status is unavailable; completed quizzes may remain in priorities.');
     const hasCalendar = !assignmentsOnly && supports(CALENDAR, 'Moodle calendar events are unavailable; classes need a personal timetable.');
 
+    progress?.('courses');
     const courses: Course[] = list(await this.call(token, 'core_enrol_get_users_courses', { userid: identity.userId, returnusercount: false }))
       .map((raw) => {
         const course = object(raw);
@@ -326,6 +327,7 @@ export class MoodleClient implements MoodleGateway {
 
     const assignmentIds = new Set<number>();
     const quizIds = new Set<number>();
+    progress?.('assignments');
     if (courseIds.length && hasAssignments) {
       let restricted=0;
       const result = object(await this.call(token, ASSIGNMENTS, { courseids: courseIds },warning=>{
@@ -433,6 +435,7 @@ export class MoodleClient implements MoodleGateway {
       }
     }
 
+    progress?.('calendar');
     if (hasCalendar) {
       const groupIds = new Set<number>();
       if (available.has(GROUPS)) {

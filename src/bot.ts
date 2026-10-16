@@ -17,6 +17,9 @@ export interface BotServices {
 
 const HELP = `❓ How to use Moodle Calendar
 
+Independent third-party app by Tursunov Sunnatilla. Not created by UWED.
+Contact: @sunnatilla_tursunov
+
 1. Connect your own Moodle account.
 2. Tap 🔄 Sync to fetch current information.
 3. View Today, Assignments or My courses.
@@ -47,7 +50,7 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '🔗 Reconnect Moodle':'connect','🗓 My timetable':'classes',
   '➡️ Next page':'nextpage','⬅️ Previous page':'previouspage',
 };
-type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more';
+type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection';
 interface MenuState { menu: Menu; expiresAt?: number }
 interface BotReply { text: string; options: MessageOptions }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
@@ -69,6 +72,7 @@ export class Bot {
   private manualSyncs = new Map<number, number>();
   private menus = new Map<number, MenuState>();
   private pages = new Map<number,{command:string;arg:string;offset:number;total:number}>();
+  private connectionWindows = new Map<number,{url:string;expires:number}>();
 
   constructor(store: Store, messenger: Messenger, services: BotServices, defaultTimezone = 'Asia/Tashkent') {
     this.store = store;
@@ -100,13 +104,18 @@ export class Bot {
     const message = record(envelope.message);
     const from = record(message?.from);
     const chat = record(message?.chat);
+    let text=typeof message?.text==='string'?message.text.trim():null;
+    const webApp=record(message?.web_app_data);
+    if(text===null && typeof webApp?.data==='string'){
+      try{if(record(JSON.parse(webApp.data))?.action==='connected')text='/start';}catch{ /* Never trust Mini App data as account authorization. */ }
+    }
     if (!message || !from || !chat || chat.type !== 'private' || from.is_bot === true ||
-        !Number.isSafeInteger(from.id) || Number(from.id) <= 0 || from.id !== chat.id || typeof message.text !== 'string') {
+        !Number.isSafeInteger(from.id) || Number(from.id) <= 0 || from.id !== chat.id || text===null) {
       this.store.finishUpdate(updateId, nowSeconds());
       return;
     }
     const student = this.store.ensureStudent(Number(from.id), Number(chat.id), this.defaultTimezone);
-    const reply = await this.route(student, message.text.trim());
+    const reply = await this.route(student, text);
     // A transport retry must resend the same response, not repeat a class addition
     // or rotate a private calendar link for the same Telegram update.
     this.store.cacheReply(updateId, student.chatId, JSON.stringify({ moodleCalendarReply: 1, ...reply }), nowSeconds());
@@ -115,7 +124,11 @@ export class Bot {
   }
 
   private menuOptions(student: Student, menu: Menu): MessageOptions {
-    if(!student.moodleCipher && menu==='main')return keyboard([['🔗 Connect Moodle'],['❓ Help']]);
+    if(!student.moodleCipher || menu==='connection'){
+      const url=this.connectionWindow(student.id);
+      const button=new URL(url).protocol==='https:'?{text:'🔗 Connect Moodle',web_app:{url}}:{text:'🔗 Connect Moodle'};
+      return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
+    }
     if(menu==='more')return keyboard([['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
     if (menu === 'assignments') return keyboard(ASSIGNMENT_BUTTONS);
     if (menu === 'disconnect') return keyboard([['🗑 Yes, disconnect'], ['⬅️ Main menu']]);
@@ -128,6 +141,11 @@ export class Bot {
       return keyboard([...courses.map(course => [`📘 ${course.id}: ${course.name.slice(0, 55)}`]), ['📖 All courses'], ['⬅️ Main menu']]);
     }
     return keyboard(MAIN_BUTTONS);
+  }
+  private connectionWindow(id:number,force=false):string{
+    const cached=this.connectionWindows.get(id);
+    if(!force && cached && cached.expires>nowSeconds())return cached.url;
+    const url=this.services.connectLink(id);this.connectionWindows.set(id,{url,expires:nowSeconds()+840});return url;
   }
 
   private async route(student: Student, text: string): Promise<BotReply> {
@@ -148,7 +166,8 @@ export class Bot {
     let menu: Menu = state?.menu ?? 'main';
     let reply: string;
     if (command === 'start' || command === 'help' || command === 'menu') {
-      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Moodle Calendar\n\nYour classes, tasks and deadlines in one place.\n\nTap 🔗 Connect Moodle to begin.';
+      if(command==='start')this.connectionWindows.delete(id);
+      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Moodle Calendar\n\nIndependent third-party app by Tursunov Sunnatilla. Not created by UWED.\n\nTo begin, tap 🔗 Connect Moodle below. Sign-in opens in a window inside Telegram.\n\nContact: @sunnatilla_tursunov';
       if(command==='start' && /^pair_[A-Za-z0-9_-]{43}$/.test(arg) && this.services.claimPairing) {
         try {
           const connected=await this.services.claimPairing(id,arg.slice(5));
@@ -180,7 +199,8 @@ export class Bot {
       if (['pause', 'resume', 'status'].includes(command) && !slash) menu = 'settings';
       else if(command==='sync')menu='main';
       else if (command === 'timezone') menu = IANAZone.isValidZone(arg) ? 'settings' : 'timezone';
-      else if (['disconnect', 'connect', 'today', 'week', 'priorities', 'calendar'].includes(command)) menu = 'main';
+      else if(command==='connect')menu='connection';
+      else if (['disconnect', 'today', 'week', 'priorities', 'calendar'].includes(command)) menu = 'main';
       else if (command === 'courses') {menu = student.moodleCipher ? 'prepare' : 'main';if(!slash)arg='menu';}
       reply = await this.command(student, command, arg);
     } else {
@@ -227,11 +247,15 @@ export class Bot {
     const id = student.id;
     const now = nowSeconds();
     if (command === 'start' || command === 'help') return HELP;
-    if (command === 'connect') return `🔗 Connect your UWED Moodle account here:\n${this.services.connectLink(id)}\n\nThis link is private and expires shortly. Enter credentials only on the connection page. Do not forward it.`;
+    if (command === 'connect') {
+      const url=this.connectionWindow(id,true);
+      return `🔗 Connect your Moodle account\n\nTap 🔗 Connect Moodle below to open the private sign-in window.${new URL(url).protocol==='https:'?'':`\n${url}`}\n\nIndependent app by Tursunov Sunnatilla; not created by UWED. Do not forward your private connection link.`;
+    }
     if (command === 'disconnect') {
       this.store.deleteStudent(id);
       this.manualSyncs.delete(id);
       this.pages.delete(id);
+      this.connectionWindows.delete(id);
       return 'Disconnected. Your Moodle connection, saved course data, timetable, completion marks, and calendar links have been deleted. Remove the old calendar subscription from your calendar app. Tap 🔗 Connect Moodle whenever you want to start again.';
     }
     if (command === 'timezone') {
