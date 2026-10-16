@@ -3,6 +3,7 @@ export interface Config {
   encryptionKey: string; telegramToken: string; webhookSecret: string;
   telegramMode: 'polling' | 'webhook'; pollSeconds: number; timezone: string;
   moodleEventSecret: string;
+  ownerTelegramId:number|null;
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const railwayUrl=env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined;
@@ -22,12 +23,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (new URL(moodleUrl).protocol !== 'https:') throw new Error('MOODLE_URL must use HTTPS.');
   const moodleEventSecret=env.MOODLE_EVENT_SECRET || '';
   if(moodleEventSecret && moodleEventSecret.length<32)throw new Error('MOODLE_EVENT_SECRET must contain at least 32 characters.');
+  const ownerId=(env.OWNER_TELEGRAM_ID||'').trim();
+  if(ownerId && (!/^[1-9]\d*$/.test(ownerId)||!Number.isSafeInteger(Number(ownerId))))throw new Error('OWNER_TELEGRAM_ID must be a positive numeric Telegram user ID.');
   return {
     port: Number(env.PORT || 3000), host: env.HOST || (env.RENDER==='true' || env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_PUBLIC_DOMAIN ? '0.0.0.0':'127.0.0.1'), publicUrl, moodleUrl,
     databasePath: env.DATABASE_PATH || './data/moodle-calendar.sqlite', encryptionKey,
     telegramToken: envValue(env,'TELEGRAM_BOT_TOKEN','Bot_token') || '', webhookSecret: env.WEBHOOK_SECRET || '',
     telegramMode: telegramMode as Config['telegramMode'], pollSeconds, timezone: env.DEFAULT_TIMEZONE || 'Asia/Tashkent',
-    moodleEventSecret,
+    moodleEventSecret,ownerTelegramId:ownerId?Number(ownerId):null,
   };
 }
 import { envValue } from './env.ts';

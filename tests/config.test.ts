@@ -17,3 +17,10 @@ test('explicit settings override Railway defaults and private-only services bind
   assert.equal(config.host,'::');
   assert.equal(loadConfig({ENCRYPTION_KEY:key,RAILWAY_ENVIRONMENT_ID:'environment'}).host,'0.0.0.0');
 });
+
+test('owner statistics require an explicit safe numeric Telegram ID, with no implicit owner',()=>{
+  const env={ENCRYPTION_KEY:randomBytes(32).toString('base64')};
+  assert.equal(loadConfig(env).ownerTelegramId,null);
+  assert.equal(loadConfig({...env,OWNER_TELEGRAM_ID:' 6000000001 '}).ownerTelegramId,6000000001);
+  for(const value of ['@sunnatilla_tursunov','0','-1','1.5','1e3','9007199254740992'])assert.throws(()=>loadConfig({...env,OWNER_TELEGRAM_ID:value}),/positive numeric Telegram user ID/);
+});

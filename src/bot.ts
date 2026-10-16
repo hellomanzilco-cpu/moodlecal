@@ -3,6 +3,7 @@ import { Store } from './store.ts';
 import { currentAssignmentKeys, formatTime, isActionable, isFocusItem, prepareText, priorityItems, upcomingClasses } from './planning.ts';
 import type { Item, MessageOptions, Messenger, MoodleProfile, Student } from './types.ts';
 import { syncFailure } from './sync-errors.ts';
+import {formatStatistics} from './statistics.ts';
 
 export interface BotServices {
   connectLink(studentId: number): string;
@@ -52,8 +53,9 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '🔗 Reconnect Moodle':'connect','🗓 My timetable':'classes',
   '➡️ Next page':'nextpage','⬅️ Previous page':'previouspage',
   '👤 Profile':'profile','⬅️ More':'more',
+  '📊 Bot statistics':'stats','📅 Today stats':'statstoday','🗓 7-day stats':'statsweek','🔄 Refresh stats':'refreshstats',
 };
-type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile';
+type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics';
 interface MenuState { menu: Menu; expiresAt?: number }
 interface BotReply { text: string; options: MessageOptions; sensitive?:boolean }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
@@ -77,12 +79,15 @@ export class Bot {
   private pages = new Map<number,{command:string;arg:string;offset:number;total:number}>();
   private connectionWindows = new Map<number,{url:string;expires:number}>();
   private assignmentButtons=new Map<number,Item[]>();
+  private ownerTelegramId:number|null;
+  private statisticsDays=new Map<number,1|7>();
 
-  constructor(store: Store, messenger: Messenger, services: BotServices, defaultTimezone = 'Asia/Tashkent') {
+  constructor(store: Store, messenger: Messenger, services: BotServices, defaultTimezone = 'Asia/Tashkent',ownerTelegramId:number|null=null) {
     this.store = store;
     this.messenger = messenger;
     this.services = services;
     this.defaultTimezone = defaultTimezone;
+    this.ownerTelegramId=typeof ownerTelegramId==='number'&&Number.isSafeInteger(ownerTelegramId)&&ownerTelegramId>0?ownerTelegramId:null;
   }
 
   async handle(update: unknown): Promise<void> {
@@ -124,7 +129,7 @@ export class Bot {
     const reply = await this.route(student, text);
     // A transport retry must resend the same response, not repeat a class addition
     // or rotate a private calendar link for the same Telegram update.
-    // Profile reads are safe to repeat; keep personal details out of the retry cache.
+    // Read-only profile/statistics replies can be repeated without retaining their contents.
     if(!reply.sensitive)this.store.cacheReply(updateId, student.chatId, JSON.stringify({ moodleCalendarReply: 1, ...reply }), nowSeconds());
     await this.messenger.send(student.chatId, reply.text, reply.options);
     this.store.finishUpdate(updateId, nowSeconds());
@@ -136,7 +141,8 @@ export class Bot {
       const button=new URL(url).protocol==='https:'?{text:'🔗 Connect Moodle',web_app:{url}}:{text:'🔗 Connect Moodle'};
       return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
     }
-    if(menu==='more')return keyboard([['👤 Profile'],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
+    if(menu==='more')return keyboard([['👤 Profile',...(this.isOwner(student)?['📊 Bot statistics']:[])],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
+    if(menu==='statistics'&&this.isOwner(student))return keyboard([['📅 Today stats','🗓 7-day stats'],['🔄 Refresh stats'],['⬅️ More','⬅️ Main menu']]);
     if(menu==='profile')return keyboard([['🔗 Reconnect Moodle'],['⬅️ More','⬅️ Main menu']]);
     if (menu === 'assignments') return keyboard(ASSIGNMENT_BUTTONS);
     if (menu === 'disconnect') return keyboard([['🗑 Yes, disconnect'], ['⬅️ Main menu']]);
@@ -150,6 +156,7 @@ export class Bot {
     }
     return keyboard(MAIN_BUTTONS);
   }
+  private isOwner(student:Student):boolean{return this.ownerTelegramId!==null&&student.telegramId===this.ownerTelegramId;}
   private connectionWindow(id:number,force=false):string{
     const cached=this.connectionWindows.get(id);
     if(!force && cached && cached.expires>nowSeconds())return cached.url;
@@ -208,6 +215,7 @@ export class Bot {
       if (['pause', 'resume', 'status'].includes(command) && !slash) menu = 'settings';
       else if(command==='sync')menu='main';
       else if(command==='profile')menu='profile';
+      else if(['stats','statstoday','statsweek','refreshstats'].includes(command))menu=this.isOwner(student)?'statistics':'more';
       else if (command === 'timezone') menu = IANAZone.isValidZone(arg) ? 'settings' : 'timezone';
       else if(command==='connect')menu='connection';
       else if (['disconnect', 'today', 'week', 'priorities', 'calendar'].includes(command)) menu = 'main';
@@ -231,7 +239,7 @@ export class Bot {
       if(page.offset+6<page.total)navigation.push({text:'➡️ Next page'});
       options.reply_markup.keyboard.unshift(navigation);
     }
-    return { text: reply, options, sensitive:command==='profile' };
+    return { text: reply, options, sensitive:command==='profile'||['stats','statstoday','statsweek','refreshstats'].includes(command??'') };
   }
 
   private page<T>(id:number,command:string,arg:string,items:T[]):{items:T[];footer:string}{
@@ -261,6 +269,12 @@ export class Bot {
     const id = student.id;
     const now = nowSeconds();
     if (command === 'start' || command === 'help') return HELP;
+    if(['stats','statstoday','statsweek','refreshstats'].includes(command)){
+      if(!this.isOwner(student))return '🔒 Bot statistics are available only to the bot owner.';
+      const days=command==='statstoday'?1:command==='refreshstats'?(this.statisticsDays.get(id)||7):7;
+      this.statisticsDays.set(id,days);
+      return formatStatistics(this.store.statistics(),days,now);
+    }
     if (command === 'connect') {
       const url=this.connectionWindow(id,true);
       return `🔗 Connect your Moodle account\n\nTap 🔗 Connect Moodle below to open the private sign-in window.${new URL(url).protocol==='https:'?'':`\n${url}`}\n\nIndependent app by Tursunov Sunnatilla; not created by UWED. Do not forward your private connection link.`;
@@ -270,6 +284,7 @@ export class Bot {
       this.manualSyncs.delete(id);
       this.pages.delete(id);
       this.connectionWindows.delete(id);
+      this.statisticsDays.delete(id);
       return 'Disconnected. Your Moodle connection, saved course data, timetable, completion marks, and calendar links have been deleted. Remove the old calendar subscription from your calendar app. Tap 🔗 Connect Moodle whenever you want to start again.';
     }
     if (command === 'timezone') {

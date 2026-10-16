@@ -2,6 +2,10 @@
 
 ## Assignment and sync report update
 
+### Owner statistics update
+
+The suite contains **131 passing tests**, with TypeScript checks passing. More → Bot statistics requires the numeric `OWNER_TELEGRAM_ID` in every route; a forged username, typed button, slash command or absent owner configuration cannot grant access. Restricted replies are excluded from the durable reply cache. Tests cover today/seven-day windows across Tashkent midnight, current-account deletion, partial sync counts and exclusion of future/out-of-range counters. The owner account was matched through Telegram's authenticated getChat response rather than assumed from database order. Configuration and smoke checks send no messages to real students.
+
 ### Profile update
 
 The suite now contains **128 passing tests**, with TypeScript checks passing. More → Profile reads the connected student's explicit Moodle first name, last name and username on demand. The private-chat handler and service isolate accounts, reject results after a connection change and sanitize failures. Profile contents are excluded from the bot's durable reply cache and analytics. Passwords remain unretained and the profile displays “Not stored” with a reconnect button. Missing name fields are labeled unavailable rather than guessed from a display name. The Moodle response contract is documented in [the official site-info API implementation](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/webservice/externallib.php).

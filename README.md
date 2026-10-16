@@ -135,7 +135,9 @@ Select your work, read any teacher statement, review filenames and requirements,
 
 The bot accepts up to **10 files / 20 MiB total**, subject to stricter teacher file count, per-file size, formats, word limit, opening/cutoff and editing permissions. Replacing existing work needs an explicit replacement confirmation. Group/timed assignments, unsupported plugins or file-type groups, and larger files must use Moodle. A draft is never presented as submitted. An uncertain write is not retried; verify its status first. [Detailed behavior and recovery](docs/ASSIGNMENTS.md).
 
-The public `/privacy` page explains account data and aggregate analytics. Operators can run `npm run stats` locally or `node /app/scripts/stats.mjs` through authenticated Railway SSH for aggregate connection, sync, download and submission counts. There is no public statistics or student roster endpoint.
+The public `/privacy` page explains account data and aggregate analytics. Set `OWNER_TELEGRAM_ID` to your verified numeric Telegram user ID in `.env` and cloud variables. Only that account sees **More → 📊 Bot statistics**, with Today, 7-day and Refresh buttons. Other accounts cannot open it by typing the button text or `/stats`; authorization never uses a username. The page shows current registered/connected/paused account counts and aggregate activity since tracking was enabled, using Asia/Tashkent dates. Disconnect removes an account from current totals; these are not lifetime signups. No student names, usernames, credentials or individual activity histories appear.
+
+Operators can also run `npm run stats` locally or `node /app/scripts/stats.mjs` through authenticated Railway SSH. There is no public statistics or student roster endpoint.
 
 Example timetable entry, using a course ID from **📚 My courses**:
 

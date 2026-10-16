@@ -36,6 +36,26 @@ function setup(t: { after(fn: () => void): void }) {
 }
 const labels = (options?: MessageOptions) => options?.reply_markup?.keyboard.flatMap(row => row.map(button => button.text)) ?? [];
 
+test('only the numeric owner sees aggregate statistics; forged usernames, commands and cached retries cannot grant access',async t=>{
+  const s=setup(t);s.connected(101);s.connected(202);
+  const bot=new Bot(s.store,{async send(chatId,text,options){s.sent.push({chatId,text,options});}},s.services,'Asia/Tashkent',101);
+  await bot.handle(s.update(101,'🧭 More'));assert.ok(labels(s.sent.at(-1)!.options).includes('📊 Bot statistics'));
+  await bot.handle(s.update(202,'🧭 More'));assert.ok(!labels(s.sent.at(-1)!.options).includes('📊 Bot statistics'));
+  let reads=0;const statistics=s.store.statistics.bind(s.store);s.store.statistics=()=>{reads++;return statistics();};
+  for(const command of ['/stats','📊 Bot statistics','📅 Today stats','🗓 7-day stats','🔄 Refresh stats']){
+    await bot.handle(s.update(202,command,{from:{id:202,is_bot:false,username:'sunnatilla_tursunov'}}));
+    assert.match(s.sent.at(-1)!.text,/only to the bot owner/);assert.doesNotMatch(s.sent.at(-1)!.text,/Registered:/);
+  }
+  assert.equal(reads,0);
+  const update=s.update(101,'📊 Bot statistics');await bot.handle(update);
+  assert.match(s.sent.at(-1)!.text,/Registered: 2/);assert.match(s.sent.at(-1)!.text,/Last 7 days/);assert.equal(s.store.cachedReply(update.update_id),null);
+  assert.deepEqual(labels(s.sent.at(-1)!.options),['📅 Today stats','🗓 7-day stats','🔄 Refresh stats','⬅️ More','⬅️ Main menu']);
+  await bot.handle(s.update(101,'📅 Today stats'));assert.match(s.sent.at(-1)!.text,/Today ·/);
+  await bot.handle(s.update(101,'🔄 Refresh stats'));assert.match(s.sent.at(-1)!.text,/Today ·/);
+  await bot.handle(s.update(101,'🗓 7-day stats'));assert.match(s.sent.at(-1)!.text,/Last 7 days/);
+  await s.send(101,'/stats');assert.match(s.sent.at(-1)!.text,/only to the bot owner/);
+});
+
 test('More opens only the requesting student profile without retaining personal details or exposing passwords',async t=>{
   const s=setup(t);const alice=s.connected(101),bob=s.connected(202);const requests:number[]=[];
   s.services.profile=async id=>{requests.push(id);return id===alice.id?{firstName:'Ali',lastName:'Valiyev',username:'ali.uwed'}:{firstName:'Bob',lastName:'Private',username:'bob.private'};};

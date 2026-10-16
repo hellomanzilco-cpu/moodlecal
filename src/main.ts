@@ -18,7 +18,7 @@ async function main() {
   const messenger=telegram || {async send() { throw new Error('Telegram is not configured.'); }};
   const service=new SyncService(store,vault,moodle,messenger,config.publicUrl,config.pollSeconds);
   const assignments=new AssignmentService(store,vault,moodle,messenger);
-  const bot=new Bot(store,messenger,service,config.timezone);
+  const bot=new Bot(store,messenger,service,config.timezone,config.ownerTelegramId);
   let queue=Promise.resolve();
   const handleUpdate=(update:unknown) => {
     const task=queue.then(async () => {
