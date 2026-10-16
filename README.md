@@ -139,6 +139,8 @@ The public `/privacy` page explains account data and aggregate analytics. Set `O
 
 Operators can also run `npm run stats` locally or `node /app/scripts/stats.mjs` through authenticated Railway SSH. There is no public statistics or student roster endpoint.
 
+The owner can open **More → Bot statistics → 👥 Users** for a separate list of students who explicitly agreed to profile sharing. Each student chooses **Settings → 🔐 Profile sharing → Yes** after reading the disclosure. Sharing is off for existing and new accounts by default and is not required to use the bot. Only the first name, last name and Moodle username are saved, encrypted and bound to the current connection and configured owner. Six records appear per page. Opening or refreshing the list never fetches unconsented Moodle profiles. Details reflect the last consent confirmation, and students can explicitly update them or stop sharing. Revocation, reconnect and disconnect remove the shared record from the live database; previously delivered Telegram messages and encrypted operator backups need separate handling. Passwords and cookies are not shared. Aggregate analytics remain anonymous.
+
 Example timetable entry, using a course ID from **📚 My courses**:
 
 ```text

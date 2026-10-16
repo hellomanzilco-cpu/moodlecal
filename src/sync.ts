@@ -8,6 +8,7 @@ import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
 import { MoodleError } from './moodle.ts';
 import { assignmentLink } from './assignment-session.ts';
+import {ProfileSharingService} from './profile-sharing.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
@@ -22,11 +23,13 @@ export class SyncService {
   private publicUrl: string;
   private pollSeconds: number;
   private now: () => number;
+  private sharing:ProfileSharingService;
   constructor(store: Store, vault: Vault, moodle: MoodleGateway,
     messenger: Messenger, publicUrl: string, pollSeconds: number,
-    now: () => number = () => Math.floor(Date.now()/1000)) {
+    now: () => number = () => Math.floor(Date.now()/1000),ownerTelegramId:number|null=null) {
     this.store=store; this.vault=vault; this.moodle=moodle; this.messenger=messenger;
     this.publicUrl=publicUrl; this.pollSeconds=pollSeconds; this.now=now;
+    this.sharing=new ProfileSharingService(store,vault,id=>this.profile(id),ownerTelegramId,now);
   }
   private async locked<T>(id: number, work: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(id) || Promise.resolve();
@@ -41,6 +44,10 @@ export class SyncService {
     return `${this.publicUrl}/connect#token=${raw}`;
   }
   assignmentLink(id:number,key:string):string{return assignmentLink(this.store,this.publicUrl,id,key,this.now());}
+  sharingStatus(id:number){return this.sharing.status(id);}
+  shareProfile(id:number):Promise<void>{return this.sharing.share(id,true);}
+  revokeProfile(id:number):void{this.sharing.revoke(id);}
+  sharedProfiles(requesterTelegramId:number,offset=0){return this.sharing.list(requesterTelegramId,offset);}
   async profile(id:number):Promise<MoodleProfile>{
     const student=this.store.getStudent(id);
     if(!student?.moodleCipher)throw new Error('Connect Moodle first.');
@@ -89,7 +96,7 @@ export class SyncService {
       progress?.('saving');
       this.store.transaction(() => {
         // Reconnecting can use a different Moodle identity: remove all previous account data.
-        for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs','portal_sessions','submission_operations']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
+        for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs','portal_sessions','submission_operations','profile_shares']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
         this.store.patchStudent(original.id,{moodleCipher:this.vault.seal(moodleToken,`moodle:${original.id}`),linkHash:null,linkExpires:null,calendarHash:null,calendarCipher:null,paused:false,initialized:false});
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
         this.store.metric('connection_success',this.now());

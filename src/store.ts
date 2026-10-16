@@ -63,6 +63,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS submission_operations(id TEXT PRIMARY KEY,studentId INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,assignmentKey TEXT NOT NULL,connectionHash TEXT NOT NULL,state TEXT NOT NULL,stage TEXT NOT NULL,message TEXT NOT NULL,proof TEXT NOT NULL,createdAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS submission_owner ON submission_operations(studentId,assignmentKey,createdAt);
       CREATE TABLE IF NOT EXISTS usage_daily(day TEXT NOT NULL,event TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(day,event));
+      CREATE TABLE IF NOT EXISTS profile_shares(studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,ownerTelegramId INTEGER NOT NULL,connectionHash TEXT NOT NULL,profileCipher TEXT NOT NULL,sharedAt INTEGER NOT NULL,consentVersion TEXT NOT NULL);
       PRAGMA user_version=1;`);
     if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
   }

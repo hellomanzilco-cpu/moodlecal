@@ -2,6 +2,10 @@
 
 ## Assignment and sync report update
 
+### Optional named profile sharing
+
+The suite contains **138 passing tests**, with TypeScript checks passing. Named profiles are off by default, separate from anonymous counters, and require a private student disclosure followed by an unexpired confirmation. The owner-only Users list reads only opt-in encrypted records, paginated six at a time; viewing it does not query Moodle profiles. Tests cover absent/invalid consent, owner and connection binding, encrypted storage, account isolation, revoke/disconnect during an in-flight read, reconnect with the same token, pagination and a failed Telegram delivery retried after revocation. Named replies are excluded from durable retry caching. Existing accounts are not backfilled, and no real student consent or name was collected during testing.
+
 ### Owner statistics update
 
 The suite contains **131 passing tests**, with TypeScript checks passing. More → Bot statistics requires the numeric `OWNER_TELEGRAM_ID` in every route; a forged username, typed button, slash command or absent owner configuration cannot grant access. Restricted replies are excluded from the durable reply cache. Tests cover today/seven-day windows across Tashkent midnight, current-account deletion, partial sync counts and exclusion of future/out-of-range counters. The owner account was matched through Telegram's authenticated getChat response rather than assumed from database order. Configuration and smoke checks send no messages to real students.

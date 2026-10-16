@@ -4,6 +4,9 @@ import { DateTime } from 'luxon';
 import { Bot } from '../src/bot.ts';
 import { Store } from '../src/store.ts';
 import { TelegramClient, TelegramError, splitTelegramText } from '../src/telegram.ts';
+import {randomBytes} from 'node:crypto';
+import {Vault} from '../src/security.ts';
+import {ProfileSharingService} from '../src/profile-sharing.ts';
 import type { BotServices } from '../src/bot.ts';
 import type { Item, MessageOptions, Messenger, Student } from '../src/types.ts';
 
@@ -35,6 +38,34 @@ function setup(t: { after(fn: () => void): void }) {
   return { store, sent, services, calls, bot, update, send, connected };
 }
 const labels = (options?: MessageOptions) => options?.reply_markup?.keyboard.flatMap(row => row.map(button => button.text)) ?? [];
+
+test('student disclosure precedes consent; owner lists only opted-in profiles and revocation survives a failed delivery retry',async t=>{
+  const s=setup(t);const alice=s.connected(101);s.connected(202);s.connected(303);
+  const reads:number[]=[];const sharing=new ProfileSharingService(s.store,new Vault(randomBytes(32).toString('base64')),async id=>{reads.push(id);return {firstName:'Alice',lastName:'Student',username:'alice-private'};},303);
+  Object.assign(s.services,{sharingStatus:(id:number)=>sharing.status(id),shareProfile:(id:number)=>sharing.share(id,true),revokeProfile:(id:number)=>sharing.revoke(id),sharedProfiles:(id:number,offset?:number)=>sharing.list(id,offset)});
+  let fail=false;
+  const bot=new Bot(s.store,{async send(chatId,text,options){s.sent.push({chatId,text,options});if(fail)throw new Error('offline');}},s.services,'Asia/Tashkent',303);
+  const send=async(id:number,text:string)=>{await bot.handle(s.update(id,text));return s.sent.at(-1)!;};
+  assert.match((await send(303,'👥 Users')).text,/No students have opted in/);assert.deepEqual(reads,[]);
+  await send(101,'✅ Yes, share my profile');assert.deepEqual(reads,[]);
+  await send(101,'⚙️ Settings');assert.ok(labels(s.sent.at(-1)!.options).includes('🔐 Profile sharing'));
+  const notice=await send(101,'🔐 Profile sharing');assert.match(notice.text,/Tursunov Sunnatilla/);assert.match(notice.text,/first name, last name and username/);assert.match(notice.text,/optional/);assert.match(notice.text,/Passwords, cookies, coursework and grades are not included/);
+  await send(101,'⬅️ Settings');assert.equal(sharing.status(alice.id).enabled,false);
+  await send(101,'🔐 Profile sharing');await send(101,'✅ Yes, share my profile');assert.equal(sharing.status(alice.id).enabled,true);
+  const list=await send(303,'👥 Users');assert.match(list.text,/alice-private/);assert.deepEqual(reads,[alice.id]);assert.match((await send(202,'/users')).text,/only to the bot owner/);
+  const retry=s.update(303,'🔄 Refresh users');fail=true;await assert.rejects(bot.handle(retry),/offline/);assert.equal(s.store.cachedReply(retry.update_id),null);
+  fail=false;await send(101,'🚫 Stop sharing');assert.equal(sharing.status(alice.id).enabled,false);
+  await bot.handle(retry);assert.match(s.sent.at(-1)!.text,/No students have opted in/);assert.doesNotMatch(s.sent.at(-1)!.text,/alice-private/);
+});
+
+test('profile consent confirmation expires and unconnected accounts cannot enable sharing',async t=>{
+  const s=setup(t);s.connected(101);let shares=0;
+  Object.assign(s.services,{sharingStatus:()=>({enabled:false,sharedAt:null}),async shareProfile(){shares++;},revokeProfile(){}});
+  let time=Date.now();t.mock.method(Date,'now',()=>time);
+  const bot=new Bot(s.store,{async send(chatId,text,options){s.sent.push({chatId,text,options});}},s.services,'Asia/Tashkent',303);
+  await bot.handle(s.update(101,'🔐 Profile sharing'));time+=301000;await bot.handle(s.update(101,'✅ Yes, share my profile'));assert.equal(shares,0);assert.match(s.sent.at(-1)!.text,/read the disclosure/);
+  await bot.handle(s.update(202,'🔐 Profile sharing'));await bot.handle(s.update(202,'✅ Yes, share my profile'));assert.equal(shares,0);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+});
 
 test('only the numeric owner sees aggregate statistics; forged usernames, commands and cached retries cannot grant access',async t=>{
   const s=setup(t);s.connected(101);s.connected(202);

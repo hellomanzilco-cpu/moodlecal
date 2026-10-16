@@ -30,6 +30,8 @@ test('connection page permits only Telegram SDK, hides tokens and declares indep
   assert.match(response.body,/Tursunov Sunnatilla/);assert.match(response.body,/not created by or on behalf of UWED/);
   assert.match(String(response.headers['content-security-policy']),/frame-ancestors https:\/\/web.telegram.org/);assert.equal(response.headers['x-frame-options'],undefined);
   for(const match of response.body.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g))assert.doesNotThrow(()=>new Script(match[1]));
+  assert.match(response.body,/Sharing your name and username with the creator is off by default/);
+  const privacy=await f.app.inject({url:'/privacy'});assert.equal(privacy.statusCode,200);assert.match(privacy.body,/Optional profile sharing is off by default/);assert.match(privacy.body,/saved encrypted, separately from analytics/);assert.match(privacy.body,/Stop sharing, reconnect or disconnect/);
 });
 test('connection progress belongs to its private attempt, follows actual stages and completes only after saving',async t=>{
  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});

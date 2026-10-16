@@ -1,9 +1,10 @@
 import { DateTime, IANAZone } from 'luxon';
 import { Store } from './store.ts';
 import { currentAssignmentKeys, formatTime, isActionable, isFocusItem, prepareText, priorityItems, upcomingClasses } from './planning.ts';
-import type { Item, MessageOptions, Messenger, MoodleProfile, Student } from './types.ts';
+import type { Item, MessageOptions, Messenger, MoodleProfile, SharedProfilePage, Student } from './types.ts';
 import { syncFailure } from './sync-errors.ts';
 import {formatStatistics} from './statistics.ts';
+import {profileField} from './profile-sharing.ts';
 
 export interface BotServices {
   connectLink(studentId: number): string;
@@ -16,6 +17,10 @@ export interface BotServices {
   requestRefresh?(studentId:number):string;
   assignmentLink?(studentId:number,key:string):string;
   profile?(studentId:number):Promise<MoodleProfile>;
+  sharingStatus?(studentId:number):{enabled:boolean;sharedAt:number|null};
+  shareProfile?(studentId:number):Promise<void>;
+  revokeProfile?(studentId:number):void;
+  sharedProfiles?(requesterTelegramId:number,offset?:number):SharedProfilePage;
 }
 
 const HELP = `❓ How to use Moodle Calendar
@@ -54,8 +59,10 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '➡️ Next page':'nextpage','⬅️ Previous page':'previouspage',
   '👤 Profile':'profile','⬅️ More':'more',
   '📊 Bot statistics':'stats','📅 Today stats':'statstoday','🗓 7-day stats':'statsweek','🔄 Refresh stats':'refreshstats',
+  '👥 Users':'users','🔄 Refresh users':'users','🔐 Profile sharing':'profilesharing',
+  '✅ Yes, share my profile':'confirmsharing','✅ Yes, update shared profile':'confirmsharing','🚫 Stop sharing':'revokesharing','⬅️ Settings':'settings',
 };
-type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics';
+type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics' | 'sharing' | 'users';
 interface MenuState { menu: Menu; expiresAt?: number }
 interface BotReply { text: string; options: MessageOptions; sensitive?:boolean }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
@@ -142,13 +149,18 @@ export class Bot {
       return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
     }
     if(menu==='more')return keyboard([['👤 Profile',...(this.isOwner(student)?['📊 Bot statistics']:[])],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
-    if(menu==='statistics'&&this.isOwner(student))return keyboard([['📅 Today stats','🗓 7-day stats'],['🔄 Refresh stats'],['⬅️ More','⬅️ Main menu']]);
-    if(menu==='profile')return keyboard([['🔗 Reconnect Moodle'],['⬅️ More','⬅️ Main menu']]);
+    if(menu==='statistics'&&this.isOwner(student))return keyboard([...(this.services.sharedProfiles?[['👥 Users']]:[]),['📅 Today stats','🗓 7-day stats'],['🔄 Refresh stats'],['⬅️ More','⬅️ Main menu']]);
+    if(menu==='users'&&this.isOwner(student))return keyboard([['🔄 Refresh users'],['📊 Bot statistics'],['⬅️ More','⬅️ Main menu']]);
+    if(menu==='profile')return keyboard([...(this.sharingAvailable()?[['🔐 Profile sharing']]:[]),['🔗 Reconnect Moodle'],['⬅️ More','⬅️ Main menu']]);
+    if(menu==='sharing'&&this.sharingAvailable()){
+      const enabled=this.services.sharingStatus!(student.id).enabled;
+      return keyboard([[enabled?'✅ Yes, update shared profile':'✅ Yes, share my profile'],...(enabled?[['🚫 Stop sharing']]:[]),['⬅️ Settings']]);
+    }
     if (menu === 'assignments') return keyboard(ASSIGNMENT_BUTTONS);
     if (menu === 'disconnect') return keyboard([['🗑 Yes, disconnect'], ['⬅️ Main menu']]);
     if (menu === 'settings' || menu === 'timezone') return keyboard([
       [student.paused ? '🔔 Resume alerts' : '🔔 Pause alerts', '🌍 Time zone'],
-      ['ℹ️ Status', '🔗 Reconnect Moodle'], ['❓ Help', '🔒 Disconnect'], ['⬅️ Main menu'],
+      ['ℹ️ Status', '🔗 Reconnect Moodle'], ...(this.sharingAvailable()?[['🔐 Profile sharing']]:[]), ['❓ Help', '🔒 Disconnect'], ['⬅️ Main menu'],
     ], menu === 'timezone' ? 'Type a time zone, e.g. Asia/Tashkent' : 'Choose a setting');
     if (menu === 'prepare') {
       const courses = this.store.courses(student.id).filter(course => !course.muted).slice(0, 40);
@@ -157,6 +169,7 @@ export class Bot {
     return keyboard(MAIN_BUTTONS);
   }
   private isOwner(student:Student):boolean{return this.ownerTelegramId!==null&&student.telegramId===this.ownerTelegramId;}
+  private sharingAvailable():boolean{return this.ownerTelegramId!==null&&!!this.services.sharingStatus&&!!this.services.shareProfile&&!!this.services.revokeProfile;}
   private connectionWindow(id:number,force=false):string{
     const cached=this.connectionWindows.get(id);
     if(!force && cached && cached.expires>nowSeconds())return cached.url;
@@ -195,6 +208,26 @@ export class Bot {
       menu='more';reply='🧭 More\n\nView your profile, plan your week or open your calendar.';
     } else if (command === 'settings') {
       menu = 'settings'; reply = `⚙️ Settings\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\nChoose a setting below.`;
+    } else if(command==='profilesharing'){
+      if(!student.moodleCipher||!this.sharingAvailable()){
+        menu='settings';reply=student.moodleCipher?'Profile sharing is not available.':'Connect Moodle before managing profile sharing.';
+      }else{
+        const status=this.services.sharingStatus!(id);
+        this.menus.set(id,{menu:'sharing',expiresAt:nowSeconds()+300});
+        return {text:`🔐 Share profile with creator?\n\nCurrently: ${status.enabled?'On':'Off'}\n\nIf you agree, Tursunov Sunnatilla (@sunnatilla_tursunov), the creator of this independent app, can see your Moodle first name, last name and username in a private user list. These details will be saved encrypted until you stop sharing, reconnect or disconnect.\n\nSharing is optional. You can use all student features without it. Passwords, cookies, coursework and grades are not included.\n\nStop sharing here at any time. This removes the saved shared profile; messages already delivered cannot be erased.\n\nTap Yes below only if you agree.`,options:this.menuOptions(student,'sharing')};
+      }
+    } else if(command==='confirmsharing'){
+      menu='profile';
+      if(!student.moodleCipher||!this.sharingAvailable()||state?.menu!=='sharing'||(state.expiresAt??0)<nowSeconds()){
+        reply='Open Settings → 🔐 Profile sharing to read the disclosure and confirm your choice.';
+      }else{
+        try{await this.services.shareProfile!(id);reply='✅ Profile sharing is on\n\nYour Moodle first name, last name and username are visible to Tursunov Sunnatilla. Open 🔐 Profile sharing to update or stop sharing at any time.';}
+        catch{reply='⚠️ Your profile could not be shared. Moodle may be unavailable or your connection changed. Open 🔐 Profile sharing to check your current setting and try again.';}
+      }
+    } else if(command==='revokesharing'){
+      menu='settings';
+      if(this.services.revokeProfile){this.services.revokeProfile(id);reply='✅ Profile sharing is off\n\nYour saved shared profile has been removed from the creator’s list. You can continue using the bot. Messages already delivered cannot be erased.';}
+      else reply='Profile sharing is not available.';
     } else if (command === 'timezonemenu') {
       menu = 'timezone'; reply = '🌍 Time zone\nType your IANA time zone, for example Asia/Tashkent, Europe/London, or America/New_York. Your manual class times will use this zone.\nTap Main menu to cancel.';
     } else if (command === 'disconnectmenu') {
@@ -216,6 +249,7 @@ export class Bot {
       else if(command==='sync')menu='main';
       else if(command==='profile')menu='profile';
       else if(['stats','statstoday','statsweek','refreshstats'].includes(command))menu=this.isOwner(student)?'statistics':'more';
+      else if(command==='users')menu=this.isOwner(student)?'users':'more';
       else if (command === 'timezone') menu = IANAZone.isValidZone(arg) ? 'settings' : 'timezone';
       else if(command==='connect')menu='connection';
       else if (['disconnect', 'today', 'week', 'priorities', 'calendar'].includes(command)) menu = 'main';
@@ -239,7 +273,7 @@ export class Bot {
       if(page.offset+6<page.total)navigation.push({text:'➡️ Next page'});
       options.reply_markup.keyboard.unshift(navigation);
     }
-    return { text: reply, options, sensitive:command==='profile'||['stats','statstoday','statsweek','refreshstats'].includes(command??'') };
+    return { text: reply, options, sensitive:command==='profile'||['stats','statstoday','statsweek','refreshstats','users'].includes(command??'') };
   }
 
   private page<T>(id:number,command:string,arg:string,items:T[]):{items:T[];footer:string}{
@@ -269,6 +303,17 @@ export class Bot {
     const id = student.id;
     const now = nowSeconds();
     if (command === 'start' || command === 'help') return HELP;
+    if(command==='users'){
+      if(!this.isOwner(student))return '🔒 The shared user list is available only to the bot owner.';
+      try{
+        if(!this.services.sharedProfiles)throw new Error('User list unavailable');
+        const page=this.services.sharedProfiles(student.telegramId,this.pages.get(id)?.offset||0);
+        this.pages.set(id,{command:'users',arg:'',offset:page.offset,total:page.total});
+        const field=(value:string)=>profileField(value)||'Not provided by Moodle';
+        const entries=page.profiles.map((profile,index)=>`${page.offset+index+1}. First name: ${field(profile.firstName)}\nLast name: ${field(profile.lastName)}\nMoodle username: ${field(profile.username)}\nShared: ${formatTime(profile.sharedAt,student.timezone)}`);
+        return `👥 Shared user profiles\n\nShared profiles: ${page.total}\nOther accounts not listed: ${Math.max(0,page.registered-page.total)}\n\n${entries.length?entries.join('\n\n'):'No students have opted in yet.'}${page.total>6?`\n\n${page.offset+1}–${Math.min(page.offset+6,page.total)} of ${page.total}`:''}\n\nOnly students who chose Settings → Profile sharing appear here. Details reflect their last sharing confirmation. Refresh reloads consented records without requesting private profiles from Moodle.`;
+      }catch{return '👥 The shared user list could not be loaded. Try again later. No private profiles were requested from Moodle.';}
+    }
     if(['stats','statstoday','statsweek','refreshstats'].includes(command)){
       if(!this.isOwner(student))return '🔒 Bot statistics are available only to the bot owner.';
       const days=command==='statstoday'?1:command==='refreshstats'?(this.statisticsDays.get(id)||7):7;
@@ -315,8 +360,9 @@ export class Bot {
         try{
           if(!this.services.profile)throw new Error('Profile unavailable');
           const profile=await this.services.profile(id);
-          const field=(value:string)=>value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,' ').trim().slice(0,200)||'Not provided by Moodle';
-          return `👤 Your Moodle profile\n\nFirst name: ${field(profile.firstName)}\nLast name: ${field(profile.lastName)}\nUsername: ${field(profile.username)}\nPassword: Not stored\n\nYour password cannot be viewed here. To update your connection, tap 🔗 Reconnect Moodle.\n\nProfile details are read from your connected Moodle account.`;
+          const field=(value:string)=>profileField(value)||'Not provided by Moodle';
+          const sharing=this.sharingAvailable()?`\nProfile sharing with creator: ${this.services.sharingStatus!(id).enabled?'On':'Off'}`:'';
+          return `👤 Your Moodle profile\n\nFirst name: ${field(profile.firstName)}\nLast name: ${field(profile.lastName)}\nUsername: ${field(profile.username)}\nPassword: Not stored${sharing}\n\nYour password cannot be viewed here. To update your connection, tap 🔗 Reconnect Moodle.\n\nProfile details are read from your connected Moodle account.`;
         }catch{
           return '👤 Profile unavailable\n\nI could not read your current profile from Moodle. Try 👤 Profile in More again, or reconnect if your access has expired.\n\nPassword: Not stored; it cannot be displayed.';
         }
