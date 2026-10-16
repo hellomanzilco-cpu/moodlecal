@@ -60,7 +60,9 @@ test('an event received during a sync cannot be erased by acknowledging an earli
   const f=fixture();t.after(()=>f.store.close());let release!:(s:Snapshot)=>void;let requests=0;
   f.moodle.snapshot=async()=>{requests++;return requests===1 ? new Promise(resolve=>{release=resolve;}) : f.snapshot(1);};
   f.store.acceptMoodleEvent(event(),f.now);const work=f.service.processEvents();await new Promise(resolve=>setImmediate(resolve));
-  f.store.acceptMoodleEvent(event('b'.repeat(32)),f.now);release(f.snapshot(1));await work;assert.equal(requests,2);
+  f.store.acceptMoodleEvent(event('b'.repeat(32)),f.now);release(f.snapshot(1));await work;
+  assert.equal(f.store.pendingMoodleJobs(f.now).length,1,'The new revision must remain queued after the bounded worker pass.');
+  await f.service.processEvents();assert.equal(requests,2);assert.equal(f.store.pendingMoodleJobs(f.now).length,0);
 });
 test('paused students do not receive event syncs until resumed and enrolment events can discover new courses',async t=>{
   const f=fixture();t.after(()=>f.store.close());f.store.patchStudent(f.a.id,{paused:true});f.store.acceptMoodleEvent(event(),f.now);await f.service.tick();assert.equal(f.calls.length,0);

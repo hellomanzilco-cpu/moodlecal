@@ -4,6 +4,7 @@ import {assignmentSession} from './assignment-session.ts';
 import {MoodleError} from './moodle.ts';
 import {findChanges} from './changes.ts';
 import {formatTime} from './planning.ts';
+import {ConcurrencyGate} from './limits.ts';
 import type {Store} from './store.ts';
 import type {Vault} from './security.ts';
 import type {AssignmentDetail,AssignmentFile,AssignmentGateway,Messenger,SubmissionFile} from './types.ts';
@@ -49,6 +50,8 @@ export function validateSubmission(detail:AssignmentDetail,request:SubmissionReq
 }
 export class AssignmentService {
  private running=new Map<string,Promise<void>>();private downloading=new Set<number>();
+ private downloads=new ConcurrencyGate(2,8);
+ private verifying=new Map<string,Promise<SubmissionOperation>>();private releasing=new Set<string>();
  private store:Store;private vault:Vault;private gateway:AssignmentGateway;private messenger:Messenger;private now:()=>number;
  constructor(store:Store,vault:Vault,gateway:AssignmentGateway,messenger:Messenger,now=()=>Math.floor(Date.now()/1000)){
   this.store=store;this.vault=vault;this.gateway=gateway;this.messenger=messenger;this.now=now;
@@ -65,6 +68,9 @@ export class AssignmentService {
  }
  async detail(session:PortalSession){return (await this.detailWithToken(session)).detail;}
  async file(session:PortalSession,id:string,toTelegram:boolean):Promise<{file:AssignmentFile;bytes:Buffer}>{
+  return this.downloads.run(()=>this.downloadFile(session,id,toTelegram));
+ }
+ private async downloadFile(session:PortalSession,id:string,toTelegram:boolean):Promise<{file:AssignmentFile;bytes:Buffer}>{
   if(this.downloading.has(session.student.id))throw new AssignmentError('Your previous file is still being downloaded.',429);
   this.downloading.add(session.student.id);
   try{const {detail,token}=await this.detailWithToken(session),file=[...detail.attachments,...detail.submittedFiles].find(f=>fileId(f)===id);if(!file)throw new AssignmentError('This file changed or is no longer available. Refresh the assignment.',404);
@@ -94,7 +100,9 @@ export class AssignmentService {
  private async verifyContents(session:PortalSession,detail:AssignmentDetail,proof:Proof):Promise<boolean>{
   if(!this.matches(detail,proof))return false;
   const student=this.current(session),token=this.vault.open(student.moodleCipher!,`moodle:${student.id}`);
-  for(const file of proof.files){const actual=detail.submittedFiles.find(f=>f.name===file.name)!;const bytes=await this.gateway.download(token,actual,MAX_UPLOAD_BYTES);if(!file.sha256||createHash('sha256').update(bytes).digest('hex')!==file.sha256)return false;}
+  // File delivery already holds this gate for its entire transfer. Submission
+  // verification enters it here so concurrent receipts share the same budget.
+  for(const file of proof.files){const actual=detail.submittedFiles.find(f=>f.name===file.name)!;const bytes=await this.downloads.run(()=>{this.current(session);return this.gateway.download(token,actual,MAX_UPLOAD_BYTES);});try{if(!file.sha256||createHash('sha256').update(bytes).digest('hex')!==file.sha256)return false;}finally{bytes.fill(0);}}
   this.current(session);return true;
  }
  private async finish(session:PortalSession,id:string,detail:AssignmentDetail,proof:Proof):Promise<boolean>{
@@ -149,17 +157,29 @@ export class AssignmentService {
   }
  }
  private operationSafe(session:PortalSession,id:string){try{return this.operation(session,id);}catch{return null;}}
- async verify(session:PortalSession,id:string){const operation=this.operation(session,id);if(!operation)throw new AssignmentError('Submission receipt not found.',404);if(operation.state==='working')return operation;
-  if(operation.state==='failed')return operation;
-  const detail=await this.detail(session),proof=JSON.parse(operation.proof) as Proof;
-  await this.finish(session,id,detail,proof);return this.operation(session,id)!;
+ async verify(session:PortalSession,id:string):Promise<SubmissionOperation>{
+  const operation=this.operation(session,id);if(!operation)throw new AssignmentError('Submission receipt not found.',404);if(operation.state==='working'||operation.state==='failed')return operation;
+  if(this.releasing.has(id))throw new AssignmentError('This receipt is being checked before closing. Wait for its result.',409);
+  const existing=this.verifying.get(id);if(existing)return existing;
+  const work=(async()=>{
+   const detail=await this.detail(session),proof=JSON.parse(operation.proof) as Proof;
+   const matched=await this.finish(session,id,detail,proof);
+   if(!matched&&(operation.state==='submitted'||operation.state==='draft'))throw new AssignmentError('The current Moodle status or files do not match this receipt. Refresh the assignment and check Moodle directly.',409);
+   return this.operation(session,id)!;
+  })();
+  this.verifying.set(id,work);
+  try{return await work;}finally{if(this.verifying.get(id)===work)this.verifying.delete(id);}
  }
  latest(session:PortalSession){this.current(session);return this.store.db.prepare('SELECT * FROM submission_operations WHERE studentId=? AND assignmentKey=? AND connectionHash=? ORDER BY createdAt DESC,rowid DESC LIMIT 1').get(session.student.id,session.key,session.connectionHash) as unknown as SubmissionOperation||null;}
  async release(session:PortalSession,id:string,confirmedNotSubmitted:boolean){
   const operation=this.operation(session,id);if(!operation)throw new AssignmentError('Submission receipt not found.',404);
   if(!confirmedNotSubmitted||operation.state!=='uncertain'||this.running.has(id))throw new AssignmentError('Check the uncertain submission in Moodle before closing this attempt.');
-  const detail=await this.detail(session);if(!['new','draft','reopened'].includes(detail.status)||!detail.canEdit)throw new AssignmentError('Moodle already reports submitted work or does not allow editing. Check it directly before making another submission.');
-  this.update(id,'failed','closed_by_student','You closed this uncertain attempt after checking Moodle. Nothing was resubmitted. Review the current task and selected files before starting a new upload.');this.store.metric('submission_attempt_closed',this.now());return this.operation(session,id)!;
+  if(this.verifying.has(id)||this.releasing.has(id))throw new AssignmentError('This receipt is already being checked. Wait for its result before closing it.',409);
+  this.releasing.add(id);
+  try{
+   const detail=await this.detail(session);if(!['new','draft','reopened'].includes(detail.status)||!detail.canEdit)throw new AssignmentError('Moodle already reports submitted work or does not allow editing. Check it directly before making another submission.');
+   this.update(id,'failed','closed_by_student','You closed this uncertain attempt after checking Moodle. Nothing was resubmitted. Review the current task and selected files before starting a new upload.');this.store.metric('submission_attempt_closed',this.now());return this.operation(session,id)!;
+  }finally{this.releasing.delete(id);}
  }
- async drain(){await Promise.allSettled(this.running.values());}
+ async drain(){await Promise.allSettled([...this.running.values(),...this.verifying.values()]);}
 }

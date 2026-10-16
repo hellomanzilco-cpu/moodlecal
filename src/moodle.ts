@@ -1,5 +1,6 @@
 import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress,AssignmentDetail,AssignmentFile,AssignmentGateway,SubmissionFile } from './types.ts';
 import {readAssignment,submissionParameters,requireNoWriteWarnings,trustedFile} from './assignment-moodle.ts';
+import {boundedBody,CapacityError,ConcurrencyGate,mapConcurrent,requestSignal,withDeadline} from './limits.ts';
 
 type RecordValue = Record<string, unknown>;
 type Parameter = string | number | boolean | Parameter[] | { [key: string]: Parameter };
@@ -85,6 +86,9 @@ export function moodleText(value: unknown): string {
     // Embedded file hyperlinks sometimes expose a webservice token as visible text.
     .replace(/((?:[?&]|&amp;)(?:wstoken|token|sesskey|password|secret|access_token)=)[^\s&#<>]*/gi, '$1[redacted]')
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/https?:\/\/[^\s<>"']+/gi,value=>{
+      try{const url=new URL(value);url.username='';url.password='';url.hash='';for(const key of [...url.searchParams.keys()])if(/token|password|sesskey|secret|credential|authorization|^auth$|^key$/i.test(key))url.searchParams.set(key,'[redacted]');return url.href;}catch{return '[unreadable link]';}
+    })
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n\s*\n/g, '\n\n')
     .trim();
@@ -182,23 +186,35 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     this.fetchImpl = fetchImpl;
   }
 
+  private network=new ConcurrencyGate(6,64);
+  private failures=0;private openUntil=0;
   private async request(path: string, parameters: Record<string, Parameter>, allowWarning?: (warning:RecordValue)=>boolean): Promise<unknown> {
+    if(Date.now()<this.openUntil)throw new MoodleError('UWED Moodle is temporarily unavailable. Please try again in 30 seconds.',true,'network');
+    const signal=requestSignal(REQUEST_TIMEOUT_MS);
+    try{return await this.network.run(()=>this.requestNow(path,parameters,signal,allowWarning),signal);}
+    catch(error){
+      if(error instanceof MoodleError){if(error.reason==='network'&&++this.failures>=3)this.openUntil=Date.now()+30000;throw error;}
+      if(error instanceof CapacityError)throw new MoodleError(error.message,true);
+      throw new MoodleError('Moodle could not be reached. Please try again.',true,'network');
+    }
+  }
+  private async requestNow(path:string,parameters:Record<string,Parameter>,signal:AbortSignal,allowWarning?:(warning:RecordValue)=>boolean):Promise<unknown>{
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
         body: flatten(parameters),
         redirect: 'error',
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal,
       });
       if (!response.ok) {
         throw new MoodleError(
           response.status === 429 ? 'Moodle is busy. Please try again later.' : 'Moodle could not be reached. Please try again.',
           response.status === 429 || response.status >= 500,
+          response.status>=500?'network':'upstream',
         );
       }
-      const content = await response.text();
-      if (content.length > 20_000_000) throw new MoodleError('Moodle returned an oversized response.', true);
+      const content = (await boundedBody(response,20_000_000)).toString('utf8');
       let data: unknown;
       try { data = JSON.parse(content); } catch {
         throw new MoodleError('Moodle returned an unreadable response. Please try again.', true);
@@ -222,9 +238,10 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
           throw error;
         }
       }
-      return data;
+      this.failures=0;return data;
     } catch (error) {
       if (error instanceof MoodleError) throw error;
+      if(error instanceof CapacityError)throw new MoodleError(error.message,true);
       throw new MoodleError('Moodle could not be reached. Please try again.', true,'network');
     }
   }
@@ -274,7 +291,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
   }
 
   async assignment(token:string,assignmentId:number,courseId:number,now:number):Promise<AssignmentDetail>{
-    return readAssignment({baseUrl:this.baseUrl,identify:value=>this.identify(value),call:(value,name,params,allowWarning)=>this.call(value,name,params,allowWarning)},token,assignmentId,courseId,now,assignmentAccess);
+    return withDeadline(60000,()=>readAssignment({baseUrl:this.baseUrl,identify:value=>this.identify(value),call:(value,name,params,allowWarning)=>this.call(value,name,params,allowWarning)},token,assignmentId,courseId,now,assignmentAccess));
   }
   async download(token:string,file:AssignmentFile,maxBytes:number):Promise<Buffer>{
     const trusted=trustedFile(this.baseUrl,{filename:file.name,fileurl:file.url,filesize:file.size});
@@ -299,7 +316,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       const form=new FormData();form.set('token',token);form.set('itemid',String(draftId));form.set('filepath','/');form.set('file_1',new Blob([new Uint8Array(file.bytes)],{type:file.mime} ),file.name);
       const response=await this.fetchImpl(this.baseUrl+'/webservice/upload.php',{method:'POST',body:form,redirect:'error',signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS)});
       if(!response.ok)throw new MoodleError('Moodle rejected the file upload. Check its upload limits and try directly in Moodle.',false,'permission');
-      const data:unknown=await response.json();if(!Array.isArray(data)||data.length!==1)throw new MoodleError('Moodle did not confirm the draft file upload. No final submission was requested.');
+      const data:unknown=JSON.parse((await boundedBody(response,1024*1024)).toString('utf8'));if(!Array.isArray(data)||data.length!==1)throw new MoodleError('Moodle did not confirm the draft file upload. No final submission was requested.');
       const uploaded=object(data[0]);const returnedId=id(uploaded.itemid);
       if(uploaded.component!=='user'||uploaded.filearea!=='draft'||uploaded.filename!==file.name||(draftId!==0&&draftId!==returnedId))throw new MoodleError('Moodle returned an unexpected upload receipt. No final submission was requested.');
       draftId=returnedId;
@@ -314,6 +331,9 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
   }
 
   async snapshot(token: string, now: number, assignmentsOnly=false,progress?:ConnectionProgress): Promise<Snapshot> {
+    return withDeadline(90000,()=>this.snapshotData(token,now,assignmentsOnly,progress));
+  }
+  private async snapshotData(token:string,now:number,assignmentsOnly:boolean,progress?:ConnectionProgress):Promise<Snapshot>{
     const identity = await this.identify(token);
     const available = new Set(identity.functions);
     const warnings: string[] = [];
@@ -338,8 +358,8 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     const courseMap = new Map(courses.map((course) => [course.id, course]));
     const modules = new Map<number, RecordValue>();
     const items = new Map<string, Item>();
-    for (const course of courses) {
-      const sections = list(await this.call(token, 'core_course_get_contents', { courseid: course.id }));
+    const contents=await mapConcurrent(courses,3,async course=>({course,sections:list(await this.call(token,'core_course_get_contents',{courseid:course.id}))}));
+    for (const {course,sections} of contents) {
       for (const rawSection of sections) {
         const section = object(rawSection);
         for (const rawModule of list(section.modules)) {
@@ -383,6 +403,11 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
         return inaccessible;
       }));
       if(restricted) warnings.push(`${restricted} assignment activities could not be inspected with your student account. Hidden activity details are not available.`);
+      const submissionStatuses=new Map<number,RecordValue>();
+      if(hasSubmissions){
+        const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
+        await mapConcurrent(visible,3,async assignment=>{const assignmentId=id(assignment.id);submissionStatuses.set(assignmentId,object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId})));});
+      }
       for (const rawCourse of list(result.courses)) {
         const courseData = object(rawCourse);
         const course = courseMap.get(id(courseData.id));
@@ -399,7 +424,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
           let grade: string | null=null;
           let lastAttempt: RecordValue | undefined;
           if (hasSubmissions) {
-            const status = object(await this.call(token, SUBMISSIONS, { assignid: assignmentId, userid: identity.userId }));
+            const status = submissionStatuses.get(assignmentId)!;
             if (status.lastattempt !== undefined) {
               const last = object(status.lastattempt);
               lastAttempt = last;

@@ -36,6 +36,8 @@ Preserve `ENCRYPTION_KEY` when restarting, moving hosts, or restoring SQLite. Re
 
 The legacy `POLL_SECONDS` value remains for retry/freshness calculations. It does **not** start Moodle interval checks. Local workers can retry already accepted event jobs and process cached reminders/outbox delivery; those are separate from searching Moodle for new changes.
 
+Each Telegram student can start at most **five full Moodle syncs per Tashkent calendar day**. Connect/reconnect snapshots count toward that limit; a failed attempt counts because it still uses upstream capacity. A sixth attempt is refused before contacting Moodle. Profile, assignment-detail, and task-file views remain separate from this full-sync allowance and have their own bounded request and transfer limits. The bot shows remaining syncs in Status.
+
 Restrict `.env`, reports, database files, and backups to the operator. Disable request-body logging and redact calendar bearer-secret paths in proxy logs. Do not put passwords, bot tokens, or signing secrets in URLs, shell history, or tickets.
 
 Install locked dependencies with `npm ci`; run `npm run check` and `npm test` before deploying a change. Build with `docker compose up --build -d`. Keep a backup and previous release before schema changes. Run plugin PHPUnit tests in a compatible Moodle/PHP test environment, then stage the integration; application tests do not prove Moodle plugin compatibility.
@@ -54,7 +56,11 @@ The helper registers `/telegram/webhook` using Telegram's `secret_token`. It onl
 
 ## Backups and recovery
 
-Stop the app gracefully and copy the persistent data directory, including remaining SQLite `-wal`/`-shm` files. Back up the exact encryption key/configuration with separate restricted access. A container image does not include its named data volume. Choose a backup schedule and retention period and verify restoration into a separate location.
+The app creates daily SQLite snapshots encrypted with AES-256-GCM and retains the latest 14 encrypted backups. They are stored under `DATABASE_PATH`'s `backups` directory (on Railway, `/data/backups`). These protect against an application-level database issue but share the same volume. Download an encrypted copy separately for volume-loss recovery. Protect the exact `ENCRYPTION_KEY` separately; it is required to restore.
+
+Before this release, older deployments may have plaintext backups in that directory. After deploying this release, first confirm a new `.sqlite.enc` backup exists, then run `node scripts/secure-legacy-backups.mjs` in the app container. The migration verifies the encrypted copy before removing each plaintext source. If a SQLite journal/WAL companion prevents a safe migration, it preserves that source for manual handling. Do not delete those files by hand until a consistent encrypted replacement is verified.
+
+For a restore, stop the app and run `node scripts/restore-backup.mjs <encrypted-backup> <new-database-path>` with the matching key. The destination must not already exist. Verify the restored database before pointing `DATABASE_PATH` at it. For a raw copy of a live database, stop the app gracefully and include the SQLite `-wal`/`-shm` files. A container image does not include its named data volume.
 
 To restore, stop the app, restore the complete directory with ownership writable by the runtime user, restore the matching keys, and start one instance. Durable event jobs and pending messages should remain available. Check connection status and a private feed, then use an explicit refresh or staging signed event to verify the integration. Never overwrite the only working database during a recovery test.
 
@@ -78,6 +84,6 @@ Deadline reminders use saved active deadlines only. They do not query Moodle on 
 | Calendar is stale | Check the saved snapshot and subscription URL, then provider caching. Fetching the feed does not refresh Moodle. |
 | Connections fail after moving hosts | Verify the database uses its original encryption key. |
 
-`GET /healthz` is process liveness and backs Docker's check. `GET /readyz` reports local readiness, a missing Telegram token as 503, event mode, receiver configuration, and last accepted event. A configured receiver is not proof that UWED installed the plugin or that every student refresh succeeds.
+`GET /healthz` is process liveness and backs Docker's check. `GET /readyz` reports worker/Telegram readiness, a missing Telegram token as 503, event mode, receiver configuration, and last accepted event. A configured receiver is not proof that UWED installed the plugin or that every student refresh succeeds. Railway's configured single replica and crash-restart limit improve recovery but do not guarantee uninterrupted availability; monitor service status and trial credits.
 
 Monitor received-event errors, failed/retrying jobs, queue age, Telegram delivery age, disk space, uptime, and backup age. Track last-event time separately from each student's last refresh: lack of an event can simply mean no relevant Moodle change occurred. No external alerting service is configured by this repository.

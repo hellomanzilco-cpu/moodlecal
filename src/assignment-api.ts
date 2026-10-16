@@ -7,25 +7,28 @@ import type {Config} from './config.ts';
 import type {SubmissionFile} from './types.ts';
 import {MoodleError} from './moodle.ts';
 import {assignmentPage} from './assignment-page.ts';
+import {CapacityError} from './limits.ts';
 export function publicOperation(operation:SubmissionOperation|null){if(!operation)return null;const {id,state,stage,message,updatedAt}=operation;return {id,state,stage,message,updatedAt};}
 export function registerAssignmentRoutes(app:FastifyInstance,config:Config,service:AssignmentService){
  app.get('/assignment',async(_request,reply)=>{const nonce=newSecret();reply.removeHeader('X-Frame-Options').header('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}' https://telegram.org; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org`);return reply.type('text/html; charset=utf-8').send(assignmentPage(nonce));});
  app.register(async routes=>{
   await routes.register(multipart,{limits:{fileSize:MAX_UPLOAD_BYTES,files:MAX_UPLOAD_FILES,fields:1,parts:MAX_UPLOAD_FILES+1,fieldSize:150000}});
   const sessions=new WeakMap<FastifyRequest,PortalSession>(),rates=new Map<string,{count:number;until:number}>();let uploads=0;
-  routes.setErrorHandler((error,_request,reply)=>{if(error instanceof AssignmentError)return reply.code(error.status).send({error:error.message});if(error instanceof MoodleError)return reply.code(error.reason==='network'?503:400).send({error:error.message});return reply.code(400).send({error:'The request could not be completed. Check your file sizes, formats and assignment requirements.'});});
+  routes.setErrorHandler((error,_request,reply)=>{if(error instanceof CapacityError)return reply.code(429).send({error:'Downloads are busy. Please try again shortly.'});if(error instanceof AssignmentError)return reply.code(error.status).send({error:error.message});if(error instanceof MoodleError)return reply.code(error.reason==='network'?503:400).send({error:error.message});return reply.code(400).send({error:'The request could not be completed. Check your file sizes, formats and assignment requirements.'});});
   routes.addHook('preHandler',async(request)=>{
    if(request.headers.origin!==new URL(config.publicUrl).origin)throw new AssignmentError('Open the private assignment window from Telegram.',403);
    const header=request.headers.authorization;if(typeof header!=='string'||!header.startsWith('Bearer '))throw new AssignmentError('Open a fresh assignment button in Telegram.',401);
    const session=service.session(header.slice(7));sessions.set(request,session);
-   const bucket=request.url.endsWith('/verify')||request.url.endsWith('/release')?'verify':request.url.includes('/operations/')?'progress':request.url.endsWith('/file')?'file':request.url.endsWith('/submit')?'submit':'detail';
+   const path=request.routeOptions.url||request.url.split('?')[0];
+   const bucket=path.endsWith('/verify')||path.endsWith('/release')?'verify':path.includes('/operations/')?'progress':path.endsWith('/file')?'file':path.endsWith('/submit')?'submit':'detail';
    const now=Date.now();for(const [key,rate]of rates)if(rate.until<now)rates.delete(key);
    const key=session.student.id+':'+bucket,rate=rates.get(key)||{count:0,until:now+60000};if(++rate.count>(bucket==='progress'?120:bucket==='submit'?5:bucket==='file'?8:15))throw new AssignmentError('Please wait a moment before trying again.',429);rates.set(key,rate);
   });
   const session=(request:FastifyRequest)=>sessions.get(request)!;
   routes.post('/detail',async request=>{const auth=session(request),detail=await service.detail(auth);return {detail:publicAssignment(detail,auth.student.timezone),operation:publicOperation(service.latest(auth))};});
   routes.post<{Body:{fileId:string;toTelegram:boolean}}>('/file',{schema:{body:{type:'object',additionalProperties:false,required:['fileId','toTelegram'],properties:{fileId:{type:'string',pattern:'^[a-f0-9]{64}$'},toTelegram:{type:'boolean'}}}}},async(request,reply)=>{
-   const {file,bytes}=await service.file(session(request),request.body.fileId,request.body.toTelegram);if(request.body.toTelegram)return {ok:true};
+   const {file,bytes}=await service.file(session(request),request.body.fileId,request.body.toTelegram);if(request.body.toTelegram){bytes.fill(0);return {ok:true};}
+   reply.raw.once('finish',()=>bytes.fill(0));reply.raw.once('close',()=>bytes.fill(0));
    return reply.type('application/octet-stream').header('Content-Disposition',`attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(file.name).replace(/'/g,'%27')}`).send(bytes);
   });
   routes.post('/submit',async(request,reply)=>{

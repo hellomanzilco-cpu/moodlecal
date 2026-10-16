@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 import type { ClassEntry, Course, Item, OutboxEntry, Snapshot, Student } from './types.ts';
 import type { MoodleChangeEvent } from './moodle-events.ts';
 import type { WebsiteChange } from './changes.ts';
+import {DAILY_SYNCS,syncDay,syncResetAt} from './sync-quota.ts';
+import {hashSecret} from './security.ts';
 
 type Row = Record<string, unknown>;
 const statisticsDay=(seconds:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(seconds*1000));
@@ -64,8 +66,12 @@ export class Store {
       CREATE INDEX IF NOT EXISTS submission_owner ON submission_operations(studentId,assignmentKey,createdAt);
       CREATE TABLE IF NOT EXISTS usage_daily(day TEXT NOT NULL,event TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(day,event));
       CREATE TABLE IF NOT EXISTS profile_shares(studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,ownerTelegramId INTEGER NOT NULL,connectionHash TEXT NOT NULL,profileCipher TEXT NOT NULL,sharedAt INTEGER NOT NULL,consentVersion TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS telegram_inbox(id INTEGER PRIMARY KEY,chatId INTEGER NOT NULL,cipher TEXT NOT NULL,createdAt INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,nextAttempt INTEGER NOT NULL DEFAULT 0,lane TEXT NOT NULL DEFAULT 'menu');
+      CREATE INDEX IF NOT EXISTS telegram_inbox_chat ON telegram_inbox(chatId,id);
+      CREATE TABLE IF NOT EXISTS sync_budgets(subjectHash TEXT NOT NULL,day TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(subjectHash,day));
       PRAGMA user_version=1;`);
     if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
+    if(!this.db.prepare('PRAGMA table_info(telegram_inbox)').all().some(row=>row.name==='lane'))this.db.exec("ALTER TABLE telegram_inbox ADD COLUMN lane TEXT NOT NULL DEFAULT 'menu'");
   }
   close() { this.db.close(); }
   metric(event:string,now=Math.floor(Date.now()/1000)) {
@@ -75,6 +81,16 @@ export class Store {
     this.db.prepare('DELETE FROM usage_daily WHERE day<?').run(statisticsDay(now-90*86400));
   }
   statistics(){return {students:this.db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN moodleCipher IS NOT NULL THEN 1 ELSE 0 END),0) AS connected,COALESCE(SUM(CASE WHEN paused=1 THEN 1 ELSE 0 END),0) AS paused FROM students').get(),daily:this.db.prepare('SELECT day,event,count FROM usage_daily ORDER BY day DESC,event').all(),dayTimeZone:'Asia/Tashkent',retentionDays:90,containsPersonalIdentifiers:false};}
+  syncAllowance(telegramId:number,now=Math.floor(Date.now()/1000)){
+    const used=Number(this.db.prepare('SELECT count FROM sync_budgets WHERE subjectHash=? AND day=?').get(hashSecret('sync-budget:'+telegramId),syncDay(now))?.count||0);
+    return {used,remaining:Math.max(0,DAILY_SYNCS-used),limit:DAILY_SYNCS,resetAt:syncResetAt(now)};
+  }
+  consumeSync(telegramId:number,now=Math.floor(Date.now()/1000)):boolean{
+    return this.transaction(()=>{
+      this.db.prepare('DELETE FROM sync_budgets WHERE day<?').run(syncDay(now-2*86400));
+      return !!this.db.prepare('INSERT INTO sync_budgets(subjectHash,day,count) VALUES(?,?,1) ON CONFLICT(subjectHash,day) DO UPDATE SET count=count+1 WHERE count<?').run(hashSecret('sync-budget:'+telegramId),syncDay(now),DAILY_SYNCS).changes;
+    });
+  }
   transaction<T>(work: () => T): T {
     if (this.db.isTransaction) return work();
     this.db.exec('BEGIN IMMEDIATE');
@@ -99,7 +115,7 @@ export class Store {
   deleteStudent(id: number) {
     this.transaction(() => {
       const s=this.getStudent(id);
-      if(s) this.db.prepare('DELETE FROM replies WHERE chatId=?').run(s.chatId);
+      if(s){this.db.prepare('DELETE FROM replies WHERE chatId=?').run(s.chatId);this.db.prepare('DELETE FROM telegram_inbox WHERE chatId=?').run(s.chatId);}
       this.db.prepare('DELETE FROM meta WHERE key=?').run(`lastSyncAttempt:${id}`);
       this.db.prepare('DELETE FROM students WHERE id=?').run(id);
     });
@@ -163,7 +179,7 @@ export class Store {
   }
   removeClass(id: number, classId: number): boolean { return !!this.db.prepare('DELETE FROM classes WHERE studentId=? AND id=?').run(id, classId).changes; }
   enqueue(id: number, key: string, text: string,interactive=false) { this.db.prepare('INSERT OR IGNORE INTO outbox(studentId,dedupeKey,text,interactive) VALUES(?,?,?,?)').run(id, key, text,Number(interactive)); }
-  pending(now: number): OutboxEntry[] { return this.db.prepare('SELECT o.id,o.studentId,s.chatId,o.text,o.attempts,o.interactive FROM outbox o JOIN students s ON s.id=o.studentId WHERE sentAt IS NULL AND nextAttempt<=? AND (s.paused=0 OR o.interactive=1) ORDER BY o.id LIMIT 100').all(now) as unknown as OutboxEntry[]; }
+  pending(now: number): OutboxEntry[] { return this.db.prepare('SELECT id,studentId,chatId,text,attempts,interactive FROM (SELECT o.id,o.studentId,s.chatId,o.text,o.attempts,o.interactive,ROW_NUMBER() OVER(PARTITION BY o.studentId ORDER BY o.id) AS position FROM outbox o JOIN students s ON s.id=o.studentId WHERE sentAt IS NULL AND nextAttempt<=? AND (s.paused=0 OR o.interactive=1)) WHERE position<=5 ORDER BY id LIMIT 100').all(now) as unknown as OutboxEntry[]; }
   delivered(id: number, now: number) { this.db.prepare('UPDATE outbox SET sentAt=? WHERE id=?').run(now,id); }
   retry(id: number, now: number, attempts: number) { this.db.prepare('UPDATE outbox SET attempts=attempts+1,nextAttempt=? WHERE id=?').run(now + Math.min(3600, 15 * 2 ** Math.min(attempts, 8)),id); }
   hasUpdate(id: number): boolean { return !!this.db.prepare('SELECT 1 FROM updates WHERE id=?').get(id); }

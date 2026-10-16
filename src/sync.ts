@@ -9,6 +9,8 @@ import { syncFailure } from './sync-errors.ts';
 import { MoodleError } from './moodle.ts';
 import { assignmentLink } from './assignment-session.ts';
 import {ProfileSharingService} from './profile-sharing.ts';
+import {SyncLimitError} from './sync-quota.ts';
+import {mapConcurrent} from './limits.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
@@ -48,6 +50,8 @@ export class SyncService {
   shareProfile(id:number):Promise<void>{return this.sharing.share(id,true);}
   revokeProfile(id:number):void{this.sharing.revoke(id);}
   sharedProfiles(requesterTelegramId:number,offset=0){return this.sharing.list(requesterTelegramId,offset);}
+  syncAllowance(id:number){const student=this.store.getStudent(id);if(!student)throw new Error('Connect Moodle first.');return this.store.syncAllowance(student.telegramId,this.now());}
+  private allowanceText(id:number):string{const quota=this.syncAllowance(id);return `\n\n🔄 Daily full syncs: ${quota.used}/${quota.limit} used · ${quota.remaining} left\nResets at 00:00 Asia/Tashkent. Failed attempts count; duplicate queued taps do not.`;}
   async profile(id:number):Promise<MoodleProfile>{
     const student=this.store.getStudent(id);
     if(!student?.moodleCipher)throw new Error('Connect Moodle first.');
@@ -91,6 +95,7 @@ export class SyncService {
     if (!original) throw new Error('Connection link expired. Send /connect in Telegram.');
     await this.locked(original.id, async () => {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
+      if(!this.store.consumeSync(original.telegramId,this.now()))throw new SyncLimitError();
       const snapshot = await this.moodle.snapshot(moodleToken,this.now(),false,progress);
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
       progress?.('saving');
@@ -110,28 +115,30 @@ export class SyncService {
   async refresh(id:number):Promise<string> {
     const result=await this.synchronize(id,true,false);
     if(!result)throw new Error('Connect Moodle before refreshing.');
-    return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');
+    return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent')+this.allowanceText(id);
   }
   requestRefresh(id:number):string {
     if(!this.store.getStudent(id)?.moodleCipher)return 'Connect Moodle first.';
+    if(this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id))return '🔄 Sync is already queued or running. I’ll send the result here.';
+    if(this.syncAllowance(id).remaining===0)throw new SyncLimitError();
     const inserted=this.store.db.prepare('INSERT OR IGNORE INTO manual_sync_jobs(studentId,requestId,requestedAt) VALUES(?,?,?)').run(id,newSecret(),this.now());
-    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.' : '🔄 Sync is already queued or running. I’ll send the result here.';
+    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.\nThis uses one of your 5 daily full sync attempts.' : '🔄 Sync is already queued or running. I’ll send the result here.';
   }
   processManualJobs():Promise<void> {
     if(this.manualWork)return this.manualWork;
     const work=(async()=>{
-      const jobs=this.store.db.prepare('SELECT studentId,requestId FROM manual_sync_jobs ORDER BY requestedAt LIMIT 100').all();
-      for(const job of jobs){
+      const jobs=this.store.db.prepare('SELECT studentId,requestId FROM manual_sync_jobs ORDER BY requestedAt LIMIT 2').all();
+      await mapConcurrent(jobs,2,async job=>{
         const id=Number(job.studentId);
         let text:string;
-        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);continue;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');}
+        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);return;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent')+this.allowanceText(id);}
         catch(error){text='⚠️ Sync unavailable\n\n'+syncFailure(error);}
         this.store.transaction(()=>{
           if(!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=? AND requestId=?').get(id,job.requestId))return;
           if(this.store.getStudent(id))this.store.enqueue(id,`manual-sync:${job.requestId}`,text,true);
           this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);
         });
-      }
+      });
     })();
     this.manualWork=work.finally(()=>{this.manualWork=null;});return this.manualWork;
   }
@@ -144,6 +151,7 @@ export class SyncService {
   private async synchronize(id:number,manual:boolean,notify:boolean):Promise<RefreshResult|null> {
     return this.locked(id, async () => {
       const s = this.store.getStudent(id); if (!s?.moodleCipher || (s.paused && !manual)) return null;
+      if(manual&&!this.store.consumeSync(s.telegramId,this.now()))throw new SyncLimitError();
       try {
         this.store.setMeta(`lastSyncAttempt:${id}`,String(this.now()));
         const token = this.vault.open(s.moodleCipher,`moodle:${id}`);
@@ -201,7 +209,8 @@ export class SyncService {
     return this.deliveryWork;
   }
   private async deliverPending(): Promise<void> {
-    for (const entry of this.store.pending(this.now())) {
+      const groups=new Map<number,ReturnType<Store['pending']>>();for(const entry of this.store.pending(this.now())){const list=groups.get(entry.studentId)||[];list.push(entry);groups.set(entry.studentId,list);}
+      await mapConcurrent([...groups.values()],4,async entries=>{for (const entry of entries) {
       if (!this.store.getStudent(entry.studentId) || (this.store.getStudent(entry.studentId)?.paused && !entry.interactive)) continue;
       try { await this.messenger.send(entry.chatId,entry.text); this.store.delivered(entry.id,this.now()); }
       catch(error) {
@@ -215,13 +224,13 @@ export class SyncService {
           if(retryAfter && Number.isFinite(retryAfter)) this.store.db.prepare('UPDATE outbox SET nextAttempt=MAX(nextAttempt,?) WHERE id=?').run(this.now()+retryAfter,entry.id);
         }
       }
-    }
+    }});
   }
   async tick(): Promise<void> {
     // Website reads happen only after received Moodle events or explicit student actions.
-    await this.processManualJobs();
-    await this.processEvents();
-    this.reminders(); await this.deliver();
+    const jobs=[this.processManualJobs(),this.processEvents()];
+    this.reminders();await Promise.allSettled([...jobs,this.deliver()]);
+    await this.deliver();
   }
   async drain():Promise<void>{
     await Promise.allSettled([this.manualWork,this.eventWork].filter((work):work is Promise<void>=>work!==null));
@@ -230,13 +239,11 @@ export class SyncService {
   processEvents():Promise<void> {
     if(this.eventWork)return this.eventWork;
     const work=(async()=>{
-      while(true) {
-        const jobs=this.store.pendingMoodleJobs(this.now());if(!jobs.length)break;
-        for(const job of jobs) {
+        const jobs=this.store.pendingMoodleJobs(this.now()).slice(0,2);if(!jobs.length)return;
+        await mapConcurrent(jobs,2,async job=>{
           try {await this.sync(job.studentId,false);this.store.finishMoodleJob(job.studentId,job.revision);}
           catch {this.store.retryMoodleJob(job.studentId,job.revision,job.attempts,this.now());}
-        }
-      }
+        });
     })();
     this.eventWork=work.finally(()=>{this.eventWork=null;});
     return this.eventWork;

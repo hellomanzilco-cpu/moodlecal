@@ -1,5 +1,7 @@
 import { MoodleError } from './moodle.ts';
+import {SyncLimitError} from './sync-quota.ts';
 export function syncFailure(error:unknown):string {
+  if(error instanceof SyncLimitError)return '🔄 Daily sync limit reached\n\n'+error.message;
   let step='';
   if(error instanceof MoodleError){
     const operations:Record<string,string>={core_webservice_get_site_info:'checking the Moodle connection',core_enrol_get_users_courses:'reading your enrolled courses',core_course_get_contents:'reading course activities and documents',mod_assign_get_assignments:'reading assignment requirements',mod_assign_get_submission_status:'reading submission status and grades',mod_quiz_get_quizzes_by_courses:'reading quizzes',mod_quiz_get_user_attempts:'reading quiz attempts',core_calendar_get_calendar_events:'reading calendar events',core_group_get_course_user_groups:'reading your course groups'};

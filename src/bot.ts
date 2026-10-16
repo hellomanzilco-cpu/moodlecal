@@ -21,6 +21,7 @@ export interface BotServices {
   shareProfile?(studentId:number):Promise<void>;
   revokeProfile?(studentId:number):void;
   sharedProfiles?(requesterTelegramId:number,offset?:number):SharedProfilePage;
+  syncAllowance?(studentId:number):{used:number;remaining:number;limit:number;resetAt:number};
 }
 
 const HELP = `❓ How to use Moodle Calendar
@@ -182,6 +183,7 @@ export class Bot {
     const slash = /^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text);
     const courseButton = /^📘 (\d+):/.exec(text);
     let command = slash ? slash[1].toLowerCase() : BUTTON_COMMANDS[text];
+    if(command==='disconnect')command='disconnectmenu';
     if(command==='autoupdate')command='sync';
     let arg = slash ? (slash[2] || '').trim() : '';
     if(command==='nextpage'||command==='previouspage'){
@@ -341,7 +343,7 @@ export class Bot {
       this.store.patchStudent(id, { paused: command === 'pause' });
       if (command === 'pause') return 'Moodle notifications are paused. Tap Resume alerts to continue; Sync now still works manually.';
       if (student.moodleCipher) {
-        if(this.services.requestRefresh)return '🔔 Alerts resumed\n\n'+this.services.requestRefresh(id);
+        if(this.services.requestRefresh){try{return '🔔 Alerts resumed\n\n'+this.services.requestRefresh(id);}catch(error){return '🔔 Alerts resumed\n\n'+syncFailure(error);}}
         try { await this.services.sync(id); }
         catch { return 'Notifications are enabled. Moodle could not be refreshed just now; your saved information is still available.'; }
       }
@@ -350,7 +352,8 @@ export class Bot {
     if (command === 'status') {
       const attempt=Number(this.store.getMeta(`lastSyncAttempt:${id}`));
       const queued=!!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id);
-      return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
+      const quota=this.services.syncAllowance?.(id);
+      return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}${quota?`\nDaily full syncs: ${quota.used}/${quota.limit} used · ${quota.remaining} left\nResets: 00:00 Asia/Tashkent`:''}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
     }
     const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
     if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first: tap 🔗 Connect Moodle in the main menu. Never send your password or token in Telegram.';

@@ -15,15 +15,23 @@ import type { ConnectionState } from './connection-progress.ts';
 import type { ConnectionStage } from './types.ts';
 import type {AssignmentService} from './assignments.ts';
 import {registerAssignmentRoutes} from './assignment-api.ts';
+import {SyncLimitError} from './sync-quota.ts';
+import type {RuntimeHealth} from './runtime-health.ts';
 
-export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>,assignments?:AssignmentService) {
+export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>,assignments?:AssignmentService,runtime?:RuntimeHealth) {
   // Access logs are disabled: feed URLs and linking requests contain bearer secrets.
-  const app=Fastify({logger:false,bodyLimit:16*1024,requestTimeout:120000});
+  const app=Fastify({logger:false,bodyLimit:16*1024,requestTimeout:120000,connectionTimeout:120000,keepAliveTimeout:5000,maxRequestsPerSocket:100});
+  app.server.headersTimeout=10000;app.server.maxConnections=200;
   const rates=new Map<string,{count:number;expires:number}>();
   const connections=new Map<string,ConnectionState>();
+  const activeConnections=new Set<number>(),connectionJobs=new Set<Promise<unknown>>();
+  app.addHook('onClose',async()=>{await Promise.allSettled(connectionJobs);});
   app.addHook('onRequest',async (_request,reply) => {
     reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer')
       .header('X-Content-Type-Options','nosniff').header('X-Frame-Options','DENY');
+    reply.header('Content-Security-Policy',"default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+      .header('Permissions-Policy','camera=(), microphone=(), geolocation=()');
+    if(config.publicUrl.startsWith('https:'))reply.header('Strict-Transport-Security','max-age=31536000');
   });
   app.setErrorHandler((_error,_request,reply) => { reply.code(400).send({error:'Request could not be completed. Check your input and try again.'}); });
   if(assignments)registerAssignmentRoutes(app,config,assignments);
@@ -32,6 +40,7 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
   app.get('/readyz',async (_request,reply) => {
     store.db.prepare('SELECT 1').get();
     if (!config.telegramToken) return reply.code(503).send({ready:false,reason:'Telegram bot token is not configured.'});
+    const health=runtime?.readiness();if(health&&!health.ready)return reply.code(503).send(health);
     return {ready:true,moodleUpdates:{mode:'events',periodicChecks:false,receiverConfigured:!!config.moodleEventSecret,lastEventAt:store.getMeta('moodleEventReceivedAt')}};
   });
   app.get('/',async (_request,reply) => reply.type('text/html').send('<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Moodle Calendar</title><h1>Moodle Calendar</h1><p>Open your Moodle Calendar bot in Telegram and send /connect to link your student account.</p></html>'));
@@ -50,8 +59,8 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
     const {phase,percent,label,status,error}=state;
     return {phase,percent,label,status,...(error?{error}:{} )};
   });
-  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string;consent:boolean;attemptId?:string}}>('/api/connect',{
-    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','consent'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512},consent:{type:'boolean',const:true},attemptId:{type:'string',pattern:'^[A-Za-z0-9_-]{43}$'}}}},
+  app.post<{Body:{linkToken:string;token?:string;username?:string;password?:string;consent:boolean;attemptId?:string;asyncMode?:boolean}}>('/api/connect',{
+    schema:{body:{type:'object',additionalProperties:false,required:['linkToken','consent'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},token:{type:'string',maxLength:512},username:{type:'string',maxLength:256},password:{type:'string',maxLength:512},consent:{type:'boolean',const:true},attemptId:{type:'string',pattern:'^[A-Za-z0-9_-]{43}$'},asyncMode:{type:'boolean'}}}},
   },async (request,reply) => {
     if (request.headers.origin!==new URL(config.publicUrl).origin) return reply.code(403).send({error:'Open the connection page from your Telegram link.'});
     const now=Math.floor(Date.now()/1000); const {linkToken}=request.body;
@@ -60,32 +69,44 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
     if(rates.size>10000 && !rate) return reply.code(429).send({error:'Please try again later.'});
     if (rate && rate.expires>now && rate.count>=6) return reply.code(429).send({error:'Too many attempts. Request a fresh /connect link.'});
     rates.set(rateKey,{count:rate && rate.expires>now ? rate.count+1:1,expires:now+900});
-    if (!store.byLink(rateKey,now)) return reply.code(400).send({error:'Connection link expired. Send /connect in Telegram.'});
+    const student=store.byLink(rateKey,now);
+    if (!student) return reply.code(400).send({error:'Connection link expired. Send /connect in Telegram.'});
+    if(service.syncAllowance(student.id).remaining===0)return reply.code(429).send({error:new SyncLimitError().message});
+    if(activeConnections.has(student.id))return reply.code(409).send({error:'Your connection is still being checked. Wait for its result before retrying.'});
+    if(activeConnections.size>=3)return reply.code(429).send({error:'Connections are busy. Please try again shortly.'});
+    if(request.body.asyncMode&&!request.body.attemptId)return reply.code(400).send({error:'A private connection attempt identifier is required.'});
     for(const [key,state] of connections)if(state.expires<=now)connections.delete(key);
     const attemptKey=request.body.attemptId?hashSecret(request.body.attemptId):null;
     if(attemptKey && connections.has(attemptKey))return reply.code(409).send({error:'This connection attempt is already being processed. Check its status before retrying.'});
     if(connections.size>=5000)return reply.code(429).send({error:'Please try again later.'});
     const report=(phase:ConnectionStage)=>{if(attemptKey)connections.set(attemptKey,{phase,...CONNECTION_PHASES[phase],status:'working',linkHash:rateKey,expires:now+900});};
     const failed=(error:string)=>{const state=attemptKey?connections.get(attemptKey):null;if(state){state.status='failed';state.error=error;state.label='Could not connect.';}};
-    try {
+    const credentials={token:request.body.token,username:request.body.username,password:request.body.password};
+    request.body.password='';request.body.token='';
+    activeConnections.add(student.id);
+    const execute=async()=>{try {
       report('authenticating');
-      let token=request.body.token?.trim();
+      let token=credentials.token?.trim();
       if (!token) {
-        if (!request.body.username || !request.body.password){failed('Enter your Moodle username and password.');return reply.code(400).send({error:'Enter your Moodle username and password.'});}
-        token=await moodle.login(request.body.username,request.body.password);
+        if (!credentials.username || !credentials.password){failed('Enter your Moodle username and password.');return {code:400,body:{error:'Enter your Moodle username and password.'}};}
+        try{token=await moodle.login(credentials.username,credentials.password);}finally{credentials.password='';}
       }
       await service.connect(linkToken,token,report);
       const state=attemptKey?connections.get(attemptKey):null;
       if(state){state.percent=100;state.status='complete';state.label='You’re connected.';state.expires=now+1200;}
-      return {ok:true};
+      return {code:200,body:{ok:true}};
     } catch(error) {
       store.metric('connection_failure');
-      if(error instanceof MoodleError){const message=error.reason==='authentication'?'Moodle did not accept this sign-in. Check your Moodle username and password.':syncFailure(error);failed(message);return reply.code(error.reason==='network'?503:400).send({error:message,code:error.reason});}
+      if(error instanceof SyncLimitError){failed(error.message);return {code:429,body:{error:error.message}};}
+      if(error instanceof MoodleError){const message=error.reason==='authentication'?'Moodle did not accept this sign-in. Check your Moodle username and password.':syncFailure(error);failed(message);return {code:error.reason==='network'?503:400,body:{error:message,code:error.reason}};}
       failed('Moodle could not be connected. Try again with a fresh connection link. Your previous data is preserved.');
-      return reply.code(400).send({error:'Moodle could not be connected. Check your credentials and link expiry. Student web service permissions may need university IT support. Your previous data is preserved.'});
+      return {code:400,body:{error:'Moodle could not be connected. Check your credentials and link expiry. Student web service permissions may need university IT support. Your previous data is preserved.'}};
     } finally {
-      request.body.password='';request.body.token='';
-    }
+      credentials.password='';credentials.token='';credentials.username='';activeConnections.delete(student.id);
+    }};
+    const work=execute();connectionJobs.add(work);work.then(()=>connectionJobs.delete(work),()=>connectionJobs.delete(work));
+    if(request.body.asyncMode)return reply.code(202).send({accepted:true,attemptId:request.body.attemptId});
+    const result=await work;return reply.code(result.code).send(result.body);
   });
   app.get<{Params:{token:string}}>('/calendar/:token.ics',async (request,reply) => {
     const raw=request.params.token;

@@ -314,6 +314,8 @@ test('disconnect removes all personal data, calendar access, and pending notices
   s.store.markDone(alice.id, 'assignment:alice', true);
   s.store.enqueue(alice.id, 'alice-notice', 'A pending alert');
   await s.send(101, '/disconnect');
+  assert.ok(s.store.byTelegram(101),'A slash command must also require confirmation before deletion.');
+  await s.send(101,'🗑 Yes, disconnect');
   assert.equal(s.store.byTelegram(101), null);
   assert.equal(s.store.byCalendar('calendar-101'), null);
   assert.equal(s.store.byLink('link-101', now()), null);
