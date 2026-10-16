@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import { Store } from './store.ts';
 import { Vault, hashSecret, newSecret } from './security.ts';
 import { formatTime, priorityItems, isActionable } from './planning.ts';
-import type { Item, Messenger, MoodleGateway, ConnectionProgress } from './types.ts';
+import type { Item, Messenger, MoodleGateway, MoodleProfile, ConnectionProgress } from './types.ts';
 import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
@@ -41,6 +41,13 @@ export class SyncService {
     return `${this.publicUrl}/connect#token=${raw}`;
   }
   assignmentLink(id:number,key:string):string{return assignmentLink(this.store,this.publicUrl,id,key,this.now());}
+  async profile(id:number):Promise<MoodleProfile>{
+    const student=this.store.getStudent(id);
+    if(!student?.moodleCipher)throw new Error('Connect Moodle first.');
+    const identity=await this.moodle.identify(this.vault.open(student.moodleCipher,`moodle:${id}`));
+    if(this.store.getStudent(id)?.moodleCipher!==student.moodleCipher)throw new Error('Your Moodle connection changed. Open Profile again.');
+    return {firstName:identity.firstName??'',lastName:identity.lastName??'',username:identity.username??''};
+  }
   beginPairing(moodleToken: string): string {
     const raw=newSecret();
     this.store.setMeta('ownerPairing',JSON.stringify({hash:hashSecret(raw),expires:this.now()+900,cipher:this.vault.seal(moodleToken,'owner-pairing')}));

@@ -1,7 +1,7 @@
 import { DateTime, IANAZone } from 'luxon';
 import { Store } from './store.ts';
 import { currentAssignmentKeys, formatTime, isActionable, isFocusItem, prepareText, priorityItems, upcomingClasses } from './planning.ts';
-import type { Item, MessageOptions, Messenger, Student } from './types.ts';
+import type { Item, MessageOptions, Messenger, MoodleProfile, Student } from './types.ts';
 import { syncFailure } from './sync-errors.ts';
 
 export interface BotServices {
@@ -14,6 +14,7 @@ export interface BotServices {
   recentUpdates?(studentId:number):string;
   requestRefresh?(studentId:number):string;
   assignmentLink?(studentId:number,key:string):string;
+  profile?(studentId:number):Promise<MoodleProfile>;
 }
 
 const HELP = `❓ How to use Moodle Calendar
@@ -25,7 +26,7 @@ Contact: @sunnatilla_tursunov
 2. Tap 🔄 Sync to fetch current information.
 3. View Today, Assignments or My courses.
 
-More contains your weekly plan, priorities, preparation, calendar and recent changes.
+More contains your profile, weekly plan, priorities, preparation, calendar and recent changes.
 Settings contains your connection, alerts and time zone.
 
 Never send Moodle passwords or tokens in Telegram. Automatic website alerts require UWED’s event integration.`;
@@ -50,10 +51,11 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '🔄 Auto update':'sync','📰 Recent updates':'recentupdates','🧭 More':'more','❓ Help':'help',
   '🔗 Reconnect Moodle':'connect','🗓 My timetable':'classes',
   '➡️ Next page':'nextpage','⬅️ Previous page':'previouspage',
+  '👤 Profile':'profile','⬅️ More':'more',
 };
-type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection';
+type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile';
 interface MenuState { menu: Menu; expiresAt?: number }
-interface BotReply { text: string; options: MessageOptions }
+interface BotReply { text: string; options: MessageOptions; sensitive?:boolean }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
   keyboard: rows.map(row => row.map(text => ({ text }))), resize_keyboard: true, is_persistent: true,
   one_time_keyboard: false, input_field_placeholder: placeholder,
@@ -122,7 +124,8 @@ export class Bot {
     const reply = await this.route(student, text);
     // A transport retry must resend the same response, not repeat a class addition
     // or rotate a private calendar link for the same Telegram update.
-    this.store.cacheReply(updateId, student.chatId, JSON.stringify({ moodleCalendarReply: 1, ...reply }), nowSeconds());
+    // Profile reads are safe to repeat; keep personal details out of the retry cache.
+    if(!reply.sensitive)this.store.cacheReply(updateId, student.chatId, JSON.stringify({ moodleCalendarReply: 1, ...reply }), nowSeconds());
     await this.messenger.send(student.chatId, reply.text, reply.options);
     this.store.finishUpdate(updateId, nowSeconds());
   }
@@ -133,7 +136,8 @@ export class Bot {
       const button=new URL(url).protocol==='https:'?{text:'🔗 Connect Moodle',web_app:{url}}:{text:'🔗 Connect Moodle'};
       return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
     }
-    if(menu==='more')return keyboard([['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
+    if(menu==='more')return keyboard([['👤 Profile'],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
+    if(menu==='profile')return keyboard([['🔗 Reconnect Moodle'],['⬅️ More','⬅️ Main menu']]);
     if (menu === 'assignments') return keyboard(ASSIGNMENT_BUTTONS);
     if (menu === 'disconnect') return keyboard([['🗑 Yes, disconnect'], ['⬅️ Main menu']]);
     if (menu === 'settings' || menu === 'timezone') return keyboard([
@@ -181,7 +185,7 @@ export class Bot {
         } catch { reply='Moodle could not be connected just now. Your setup link remains available until it expires; try opening it again.\n\n'+HELP; }
       }
     } else if(command==='more'){
-      menu='more';reply='🧭 More\n\nPlan your week, prepare for class or open your calendar.';
+      menu='more';reply='🧭 More\n\nView your profile, plan your week or open your calendar.';
     } else if (command === 'settings') {
       menu = 'settings'; reply = `⚙️ Settings\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\nChoose a setting below.`;
     } else if (command === 'timezonemenu') {
@@ -203,6 +207,7 @@ export class Bot {
     } else if (command) {
       if (['pause', 'resume', 'status'].includes(command) && !slash) menu = 'settings';
       else if(command==='sync')menu='main';
+      else if(command==='profile')menu='profile';
       else if (command === 'timezone') menu = IANAZone.isValidZone(arg) ? 'settings' : 'timezone';
       else if(command==='connect')menu='connection';
       else if (['disconnect', 'today', 'week', 'priorities', 'calendar'].includes(command)) menu = 'main';
@@ -226,7 +231,7 @@ export class Bot {
       if(page.offset+6<page.total)navigation.push({text:'➡️ Next page'});
       options.reply_markup.keyboard.unshift(navigation);
     }
-    return { text: reply, options };
+    return { text: reply, options, sensitive:command==='profile' };
   }
 
   private page<T>(id:number,command:string,arg:string,items:T[]):{items:T[];footer:string}{
@@ -287,10 +292,20 @@ export class Bot {
       const queued=!!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id);
       return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
     }
-    const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass']);
+    const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
     if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first: tap 🔗 Connect Moodle in the main menu. Never send your password or token in Telegram.';
 
     switch (command) {
+      case 'profile': {
+        try{
+          if(!this.services.profile)throw new Error('Profile unavailable');
+          const profile=await this.services.profile(id);
+          const field=(value:string)=>value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,' ').trim().slice(0,200)||'Not provided by Moodle';
+          return `👤 Your Moodle profile\n\nFirst name: ${field(profile.firstName)}\nLast name: ${field(profile.lastName)}\nUsername: ${field(profile.username)}\nPassword: Not stored\n\nYour password cannot be viewed here. To update your connection, tap 🔗 Reconnect Moodle.\n\nProfile details are read from your connected Moodle account.`;
+        }catch{
+          return '👤 Profile unavailable\n\nI could not read your current profile from Moodle. Try 👤 Profile in More again, or reconnect if your access has expired.\n\nPassword: Not stored; it cannot be displayed.';
+        }
+      }
       case 'recentupdates': return this.services.recentUpdates?.(id) || '📰 No recorded website changes yet.';
       case 'courses': {
         const courses = this.store.courses(id);

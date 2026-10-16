@@ -14,6 +14,13 @@ const optional = [
 
 interface Request { url: string; options: RequestInit; parameters: URLSearchParams }
 
+test('profile identity reads explicit Moodle name fields and username without retaining password or private response fields',async()=>{
+  const f=fixture({core_webservice_get_site_info:{userid:4,fullname:'Full display name',firstname:'<b>Ali</b>',lastname:'Vali &amp; family',username:'ali.uwed',password:'never-expose',userprivateaccesskey:'private-key',functions:required.map(name=>({name}))}});
+  const identity=await f.client.identify(token);
+  assert.equal(identity.firstName,'Ali');assert.equal(identity.lastName,'Vali & family');assert.equal(identity.username,'ali.uwed');
+  assert.ok(!JSON.stringify(identity).includes('never-expose'));assert.ok(!JSON.stringify(identity).includes('private-key'));assert.equal(f.requests.length,1);
+});
+
 function fixture(overrides: Record<string, unknown> = {}, functions = [...required, ...optional]) {
   const responses: Record<string, unknown> = {
     core_webservice_get_site_info: { userid: 4, fullname: '<b>Ali &amp; Vali</b>', functions: functions.map((name) => ({ name, version: '2024100700' })) },

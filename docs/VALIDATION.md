@@ -2,6 +2,10 @@
 
 ## Assignment and sync report update
 
+### Profile update
+
+The suite now contains **128 passing tests**, with TypeScript checks passing. More → Profile reads the connected student's explicit Moodle first name, last name and username on demand. The private-chat handler and service isolate accounts, reject results after a connection change and sanitize failures. Profile contents are excluded from the bot's durable reply cache and analytics. Passwords remain unretained and the profile displays “Not stored” with a reconnect button. Missing name fields are labeled unavailable rather than guessed from a display name. The Moodle response contract is documented in [the official site-info API implementation](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/webservice/externallib.php).
+
 The expanded suite contains **124 passing tests**, with TypeScript checks passing. New checks cover exact file/time/instruction/course differences, limited coverage and failed API names, private assignment-session isolation, current teacher requirements, file/word/count limits, explicit review and replacement, multipart transfers, draft/final-submit warnings, byte-level saved-file verification, duplicate operation IDs, lost responses, restart recovery, disconnect races and aggregate-only analytics.
 
 A mobile browser test exercised the actual HTTP server with a synthetic Moodle adapter: task definition, protected download, delivery to the correct simulated Telegram chat, review without premature writes, statement acceptance, final submission, failure and closed-task restrictions. Telegram's SDK was simulated. No script errors occurred. No real coursework or test messages were sent to students.

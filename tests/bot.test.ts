@@ -36,6 +36,27 @@ function setup(t: { after(fn: () => void): void }) {
 }
 const labels = (options?: MessageOptions) => options?.reply_markup?.keyboard.flatMap(row => row.map(button => button.text)) ?? [];
 
+test('More opens only the requesting student profile without retaining personal details or exposing passwords',async t=>{
+  const s=setup(t);const alice=s.connected(101),bob=s.connected(202);const requests:number[]=[];
+  s.services.profile=async id=>{requests.push(id);return id===alice.id?{firstName:'Ali',lastName:'Valiyev',username:'ali.uwed'}:{firstName:'Bob',lastName:'Private',username:'bob.private'};};
+  await s.send(101,'🧭 More');assert.ok(labels(s.sent.at(-1)!.options).includes('👤 Profile'));
+  const update=s.update(101,'👤 Profile');await s.bot.handle(update);
+  const reply=s.sent.at(-1)!;assert.match(reply.text,/First name: Ali/);assert.match(reply.text,/Last name: Valiyev/);assert.match(reply.text,/Username: ali\.uwed/);assert.match(reply.text,/Password: Not stored/);assert.doesNotMatch(reply.text,/Bob|bob\.private|encrypted-for-test/);
+  assert.deepEqual(requests,[alice.id]);assert.equal(s.store.cachedReply(update.update_id),null);
+  assert.deepEqual(labels(reply.options),['🔗 Reconnect Moodle','⬅️ More','⬅️ Main menu']);
+  await s.send(101,'⬅️ More');assert.ok(labels(s.sent.at(-1)!.options).includes('👤 Profile'));
+  assert.match(await s.send(202,'/profile'),/bob\.private/);assert.deepEqual(requests,[alice.id,bob.id]);
+  await s.send(303,'👤 Profile');assert.equal(requests.length,2);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+});
+
+test('profile failure hides internal errors and missing fields never invent names',async t=>{
+  const s=setup(t);s.connected(101);
+  s.services.profile=async()=>{throw new Error('password=secret-token');};
+  const failure=await s.send(101,'👤 Profile');assert.match(failure,/Profile unavailable/);assert.doesNotMatch(failure,/secret-token/);
+  s.services.profile=async()=>({firstName:'',lastName:'',username:'user\nPassword: fake'});
+  const reply=await s.send(101,'👤 Profile');assert.match(reply,/First name: Not provided by Moodle/);assert.match(reply,/Last name: Not provided by Moodle/);assert.doesNotMatch(reply,/\nPassword: fake/);
+});
+
 test('emoji reply buttons navigate the main menu and settings without slash commands', async t => {
   const s = setup(t);
   const alice = s.connected(101, [item('assignment:alice', 'Alice assignment')]);

@@ -18,6 +18,20 @@ function fixture() {
   return {store,vault,moodle,service,s,sent,connect,get now(){return now;},set now(value:number){now=value;},set snapshot(value:Snapshot){snapshot=value;},get snapshot(){return snapshot;},set fail(value:boolean){fail=value;},set sendFail(value:boolean){sendFail=value;}};
 }
 
+test('profile decrypts only the requesting account and refuses stale identity after reconnection or disconnect',async t=>{
+  const f=fixture();t.after(()=>f.store.close());await f.connect();
+  const other=f.store.ensureStudent(222,222);await f.connect(other.id);
+  f.store.patchStudent(other.id,{moodleCipher:f.vault.seal('bob-token',`moodle:${other.id}`)});
+  const tokens:string[]=[];
+  f.moodle.identify=async token=>{tokens.push(token);return {userId:1,name:'Display',functions:[],firstName:token==='bob-token'?'Bob':'Ali',lastName:'Family',username:token==='bob-token'?'bob':'ali'};};
+  assert.deepEqual(await f.service.profile(f.s.id),{firstName:'Ali',lastName:'Family',username:'ali'});
+  assert.equal((await f.service.profile(other.id)).username,'bob');assert.deepEqual(tokens,['access-token','bob-token']);
+  const original=f.moodle.identify;
+  f.moodle.identify=async token=>{const identity=await original(token);f.store.patchStudent(f.s.id,{moodleCipher:f.vault.seal('replacement-token',`moodle:${f.s.id}`)});return identity;};
+  await assert.rejects(f.service.profile(f.s.id),/connection changed/);
+  f.store.deleteStudent(f.s.id);await assert.rejects(f.service.profile(f.s.id),/Connect Moodle first/);
+});
+
 test('connect encrypts credentials, consumes link, and silently baselines existing items',async t => {
   const f=fixture();t.after(()=>f.store.close());const raw=await f.connect();
   const current=f.store.getStudent(f.s.id)!;

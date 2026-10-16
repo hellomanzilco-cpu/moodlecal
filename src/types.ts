@@ -46,7 +46,8 @@ export interface AssignmentGateway {
 }
 export type ConnectionStage = 'authenticating' | 'courses' | 'assignments' | 'calendar' | 'saving';
 export type ConnectionProgress = (stage:ConnectionStage)=>void;
-export interface Identity { userId: number; name: string; functions: string[] }
+export interface Identity { userId: number; name: string; functions: string[]; firstName?:string;lastName?:string;username?:string }
+export interface MoodleProfile {firstName:string;lastName:string;username:string}
 export interface Student {
   id: number; telegramId: number; chatId: number; timezone: string;
   moodleCipher: string | null; calendarHash: string | null; calendarCipher: string | null;

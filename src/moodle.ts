@@ -252,7 +252,8 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     if (REQUIRED.some((functionName) => !functions.includes(functionName))) {
       throw new MoodleError('Your Moodle token cannot read enrolled courses and course content. Ask the university to enable these mobile web service functions.');
     }
-    return { userId: id(data.userid), name: moodleText(data.fullname) || moodleText(data.username) || 'Student', functions };
+    return { userId: id(data.userid), name: moodleText(data.fullname) || moodleText(data.username) || 'Student', functions,
+      firstName:moodleText(data.firstname),lastName:moodleText(data.lastname),username:typeof data.username==='string'?data.username.trim():'' };
   }
 
   private view(module: string, cmid: number): string {
