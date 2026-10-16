@@ -4,6 +4,8 @@ A Telegram study assistant for students at **moodle.uwed.uz**. Each student conn
 
 This repository contains the implementation and [delivery plan](docs/PLAN.md). Read-only login and assignment inspection were tested with a real UWED student account on **16 October 2026**. The emoji menu and assignment views are implemented. The university-side event bridge has **not been installed or activated**, and live automatic change notifications have not been validated.
 
+The pilot is hosted on Railway independently of the owner's computer. Open [@calmoodlebot](https://t.me/calmoodlebot) in a private Telegram chat. [Deployment and operating details](docs/HOSTING.md) include persistent storage, manual deployments, and the Free/Trial credit limits. The university event bridge is still required for website-triggered automatic updates; **🔄 Auto update** works through an explicit student request.
+
 **Moodle is never checked on a fixed interval.** Automatic website changes require UWED IT to install the included [Moodle event bridge](docs/MOODLE_EVENTS.md) and connect it to a public HTTPS receiver. A regular student account cannot enable that server feature. Until then, the bot uses saved data and explicit student refreshes; it does not fall back to interval checks.
 
 ## Inspect your own account

@@ -1,6 +1,16 @@
 # Run Moodle Calendar independently of your computer
 
-The selected host is **Railway**, starting with its Free/Trial allowance. [railway.json](../railway.json) configures one Docker service, readiness checks, no sleeping, and up to ten crash retries. The configuration is prepared locally; no cloud deployment has been created yet. A local preview stops when your computer turns off.
+The selected host is **Railway**, starting with its Free/Trial allowance. The pilot is deployed at `https://moodle-calendar-production.up.railway.app`. [railway.json](../railway.json) configures one Docker service, readiness checks, no sleeping, and up to ten crash retries. The same health/restart settings were also applied directly to the hosted service. A local preview stops when your computer turns off; the cloud copy runs independently.
+
+## Current pilot
+
+Source: [hellomanzilco-cpu/moodlecal](https://github.com/hellomanzilco-cpu/moodlecal), branch `main`. The owner's repository is currently public; credentials, databases, reports, private setup links, and SSH keys are excluded. The deployment uses the verified local Git checkout uploaded with `railway up`, because Railway's GitHub integration has not yet been granted repository access. Pushing to GitHub alone does not deploy this service. To enable that later, connect the repository through Railway's GitHub App and use `railway service source connect --repo hellomanzilco-cpu/moodlecal --branch main --service moodle-calendar`.
+
+The initial database was transferred privately and verified byte-for-byte before activation. It contains one connected student, seven courses, and 213 saved items; these counts describe the saved snapshot, not newly fetched Moodle data. Matching encrypted credentials were checked in the deployed container. The local bot remains stopped so only the hosted process consumes Telegram updates. Request the calendar URL again in Telegram to use the cloud origin.
+
+Railway account inspection on 16 October 2026 confirmed an active trial with $5 remaining usage credit and 30 trial days remaining. No paid upgrade was enabled. The API calls this trial's underlying plan `HOBBY`, but reports `isTrialing=true` and `isUsageSubscriber=false`.
+
+To deploy a later source change manually from this linked checkout, run `railway up --service moodle-calendar --detach`, then inspect deployment status and `/readyz`. Never pass `--no-gitignore` during an upload.
 
 ## Free plan limits
 
