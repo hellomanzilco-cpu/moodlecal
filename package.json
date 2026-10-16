@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.14.0 <25" },
+  "engines": {
+    "node": ">=24.14.0 <25"
+  },
   "scripts": {
     "dev": "node --watch --env-file=.env src/main.ts",
     "start": "node --env-file=.env src/main.ts",
@@ -16,9 +18,11 @@
     "bot:configure": "node scripts/configure-bot.mjs",
     "account:link": "node scripts/link-account.mjs",
     "sync:once": "node scripts/refresh-once.mjs",
-    "backup": "node scripts/backup.mjs"
+    "backup": "node scripts/backup.mjs",
+    "stats": "node scripts/stats.mjs"
   },
   "dependencies": {
+    "@fastify/multipart": "^10.1.4",
     "fastify": "^5.6.2",
     "luxon": "^3.7.2"
   },

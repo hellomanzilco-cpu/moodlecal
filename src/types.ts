@@ -26,6 +26,24 @@ export interface Item {
   files?: { name: string; size: number; modifiedAt: number }[];
 }
 export interface Snapshot { courses: Course[]; items: Item[]; warnings: string[] }
+export interface AssignmentFile {name:string;size:number;modifiedAt:number;url:string;mime:string}
+export interface AssignmentDetail {
+  id:number;courseId:number;title:string;courseName:string;description:string;url:string;
+  dueAt:number|null;availableFrom:number|null;cutoffAt:number|null;availability:Availability;availabilityReason:string;
+  status:'new'|'draft'|'submitted'|'reopened'|'unknown';graded:boolean;grade:string|null;submittedAt:number|null;
+  canEdit:boolean;canSubmit:boolean;requiresFinalSubmit:boolean;requiresStatement:boolean;statement:string;
+  fileEnabled:boolean;textEnabled:boolean;maxFiles:number;maxFileBytes:number;acceptedTypes:string[];
+  wordLimit:number|null;unsupportedReason:string|null;attachments:AssignmentFile[];submittedFiles:AssignmentFile[];
+  onlineText:string;attempt:number;revision:string;
+}
+export interface SubmissionFile {name:string;bytes:Buffer;mime:string}
+export interface AssignmentGateway {
+  assignment(token:string,assignmentId:number,courseId:number,now:number):Promise<AssignmentDetail>;
+  download(token:string,file:AssignmentFile,maxBytes:number):Promise<Buffer>;
+  uploadDraft(token:string,files:SubmissionFile[]):Promise<number>;
+  saveSubmission(token:string,assignmentId:number,draftId:number|null,text:string|undefined):Promise<void>;
+  submitForGrading(token:string,assignmentId:number,acceptStatement:boolean):Promise<void>;
+}
 export type ConnectionStage = 'authenticating' | 'courses' | 'assignments' | 'calendar' | 'saving';
 export type ConnectionProgress = (stage:ConnectionStage)=>void;
 export interface Identity { userId: number; name: string; functions: string[] }
@@ -54,4 +72,4 @@ export interface ReplyMarkup {
   input_field_placeholder?:string;
 }
 export interface MessageOptions { reply_markup?:ReplyMarkup }
-export interface Messenger { send(chatId: number, text: string, options?:MessageOptions): Promise<void> }
+export interface Messenger { send(chatId: number, text: string, options?:MessageOptions): Promise<void>;sendDocument?(chatId:number,name:string,bytes:Buffer,caption:string):Promise<void> }

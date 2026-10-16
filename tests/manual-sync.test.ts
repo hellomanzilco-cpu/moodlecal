@@ -64,3 +64,14 @@ test('Sync, old Auto update and slash sync share a single cooldown and queued op
  await send('📝 Assignments');assert.match(f.sent.at(-1)!,/Your assignments/,'menus must respond while a sync is queued');
  await f.service.processManualJobs();assert.equal(f.calls,1);
 });
+test('manual sync distinguishes limited checks and identifies a failed API step while preserving the snapshot',async t=>{
+ const f=setup(t);f.moodle.snapshot=async()=>({courses:[{id:1,name:'Economics',shortname:'ECO'}],items:[],warnings:['Quiz attempt status is unavailable; completed quizzes may remain in priorities.']});
+ const limited=await f.service.refresh(f.student.id);assert.match(limited,/finished with limits/);assert.match(limited,/Quiz attempt status is unavailable/);assert.match(limited,/Checked 1 courses/);
+ f.moodle.snapshot=async()=>{const error=new MoodleError('private URL token',true,'network');error.operation='mod_assign_get_submission_status';throw error;};f.service.requestRefresh(f.student.id);await f.service.tick();assert.match(f.sent.at(-1)!,/Failed check: reading submission status and grades/);assert.doesNotMatch(f.sent.at(-1)!,/private URL token/);assert.equal(f.store.getStudent(f.student.id)!.lastSyncAt,NOW);
+});
+test('loss of an assignment API cannot replace known assignments with generic activity records',async t=>{
+ const f=setup(t);const old={key:'assignment:5',courseId:1,courseName:'Economics',kind:'assignment' as const,title:'Known essay',description:'Brief',url:'https://moodle.uwed.uz/mod/assign/view.php?id=8',modifiedAt:1,dueAt:NOW+1000,startsAt:null,endsAt:null,completed:false};
+ f.store.saveSnapshot(f.student.id,{courses:[{id:1,name:'Economics',shortname:'ECO'}],items:[old],warnings:[]},[],NOW-3600,NOW);
+ f.moodle.snapshot=async()=>({courses:[{id:1,name:'Economics',shortname:'ECO'}],items:[{...old,key:'module:8'}],warnings:['Assignment details and deadlines are unavailable; only course activity changes are monitored.']});
+ await assert.rejects(f.service.refresh(f.student.id),/access was lost/);assert.equal(f.store.rawItems(f.student.id)[0].key,'assignment:5');assert.equal(f.store.getStudent(f.student.id)!.lastSyncAt,NOW-3600);
+});

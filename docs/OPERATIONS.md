@@ -2,7 +2,7 @@
 
 ## Current deployment boundary
 
-Moodle interval checks are disabled. Automatic website updates require UWED IT to install and activate the included Moodle bridge; the prepared bridge has not been installed at `moodle.uwed.uz`. With student access only, use cached menus and explicit **Settings → Sync now**, Connect, or Resume. Do not introduce a scheduled Moodle-fetch fallback.
+Moodle interval checks are disabled. Automatic website updates require UWED IT to install and activate the included Moodle bridge; the prepared bridge has not been installed at `moodle.uwed.uz`. With student access only, use cached menus and explicit **🔄 Sync**, Connect, Resume, or assignment-window actions. Do not introduce a scheduled Moodle-fetch fallback.
 
 Run one app instance against persistent SQLite storage. The default Compose service binds port 3000 to host loopback; place a valid HTTPS reverse proxy in front and set `PUBLIC_URL` to the external address. A public receiver is required for university events even when Telegram uses long polling.
 

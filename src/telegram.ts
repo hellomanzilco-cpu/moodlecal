@@ -88,6 +88,15 @@ export class TelegramClient implements Messenger {
     if (!Array.isArray(result)) throw new TelegramError('Telegram returned invalid updates.');
     return result;
   }
+  async sendDocument(chatId:number,name:string,bytes:Buffer,caption:string):Promise<void>{
+    if(bytes.length>20*1024*1024)throw new TelegramError('File exceeds the bot transfer limit.');
+    const work=this.queue.then(async()=>{
+      const wait=Math.max(this.lastGlobal+40,(this.lastChat.get(chatId)??0)+1000)-Date.now();if(wait>0)await new Promise(resolve=>setTimeout(resolve,wait));this.lastGlobal=Date.now();this.lastChat.set(chatId,this.lastGlobal);
+      const form=new FormData();form.set('chat_id',String(chatId));form.set('caption',caption.slice(0,900).toWellFormed());form.set('document',new Blob([new Uint8Array(bytes)],{type:'application/octet-stream'}),name);
+      try{const response=await this.fetcher(`https://api.telegram.org/bot${this.token}/sendDocument`,{method:'POST',body:form,signal:AbortSignal.timeout(60000)});const data=await response.json() as {ok?:boolean};if(!response.ok||data.ok!==true)throw new TelegramError('Telegram could not deliver this file.',undefined,response.status);}
+      catch(error){if(error instanceof TelegramError)throw error;throw new TelegramError('Telegram file delivery was interrupted.');}
+    });this.queue=work.catch(()=>{});await work;
+  }
 
   async setWebhook(url: string, secret: string): Promise<void> {
     if (new URL(url).protocol !== 'https:') throw new Error('Telegram webhook must use HTTPS.');

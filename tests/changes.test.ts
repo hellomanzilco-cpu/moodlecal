@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { findChanges } from '../src/changes.ts';
+import { findChanges,findCourseChanges,formatChanges } from '../src/changes.ts';
 import { currentAssignmentKeys, priorityItems } from '../src/planning.ts';
 import { loadConfig } from '../src/config.ts';
 import type { Item } from '../src/types.ts';
@@ -26,8 +26,17 @@ test('deadline, grading and file updates report concrete differences and unaffec
   const updated={...old,dueAt:NOW+2000,submissionStatus:'submitted_graded' as const,grade:'0 / 100',files:[{name:'brief.pdf',size:10,modifiedAt:2}]};
   const changes=findChanges([old,item('removed'),item('same')],[updated,item('new'),item('same')],'Asia/Tashkent');
   assert.deepEqual(changes.map(c=>[c.key,c.type]),[['essay','updated'],['new','new'],['removed','removed']]);
-  assert.match(changes[0].details.join('\n'),/Deadline:.*→/);assert.match(changes[0].details.join('\n'),/Grade: not released → 0 \/ 100/);assert.match(changes[0].details.join('\n'),/documents/);
+  assert.match(changes[0].details.join('\n'),/Deadline:.*→/);assert.match(changes[0].details.join('\n'),/Grade: not released → 0 \/ 100/);assert.match(changes[0].details.join('\n'),/Document revised: brief.pdf/);
   assert.equal(findChanges([updated],[{...updated,completed:true}],'Asia/Tashkent').length,0);
+});
+test('precise reports name added and removed files, cleared dates and changed instructions, and retain every change',()=>{
+ const old=item('essay',{description:'Original professor instructions',availableFrom:NOW,cutoffAt:NOW+1000,files:[{name:'old.pdf',size:10,modifiedAt:1}]});
+ const next={...old,description:'Revised professor instructions',availableFrom:null,cutoffAt:null,files:[{name:'new.pdf',size:20,modifiedAt:2}]};const changes=findChanges([old],[next],'Asia/Tashkent'),details=changes[0].details.join('\n');assert.match(details,/Document added: new.pdf/);assert.match(details,/Document removed: old.pdf/);assert.match(details,/Opening date:.*→ not published/);assert.match(details,/Submission cutoff:.*→ not published/);assert.match(details,/Before: Original/);assert.match(details,/Now: Revised/);
+ const report=formatChanges({checkedAt:NOW,baseline:false,changes:Array.from({length:22},(_,i)=>({...changes[0],title:'Change '+i}))},'Asia/Tashkent');assert.match(report,/Change 21/);
+ const limited=formatChanges({checkedAt:NOW,baseline:false,changes:[],warnings:['Grades could not be checked.']},'Asia/Tashkent');assert.match(limited,/finished with limits/);assert.match(limited,/Grades could not be checked/);assert.doesNotMatch(limited,/No changes since/);
+});
+test('enrolment and course title changes are explicit even when there are no activities',()=>{
+ const changes=findCourseChanges([{id:1,name:'Old course',shortname:'OLD'},{id:3,name:'Removed',shortname:'RM'}],[{id:1,name:'New title',shortname:'NEW'},{id:2,name:'Added',shortname:'ADD'}]);assert.deepEqual(changes.map(c=>c.type),['updated','new','removed']);assert.match(changes[0].details[0],/Old course → New title/);
 });
 test('Render configuration uses its public HTTPS origin and public bind while preserving explicit configuration',()=>{
   const key=randomBytes(32).toString('base64');

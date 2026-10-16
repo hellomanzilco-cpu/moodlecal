@@ -13,10 +13,12 @@ import { connectionPage } from './connect-page.ts';
 import { CONNECTION_PHASES } from './connection-progress.ts';
 import type { ConnectionState } from './connection-progress.ts';
 import type { ConnectionStage } from './types.ts';
+import type {AssignmentService} from './assignments.ts';
+import {registerAssignmentRoutes} from './assignment-api.ts';
 
-export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>) {
+export function createApp(config: Config, store: Store, service: SyncService, moodle: MoodleGateway, onUpdate: (update: unknown) => Promise<void>,assignments?:AssignmentService) {
   // Access logs are disabled: feed URLs and linking requests contain bearer secrets.
-  const app=Fastify({logger:false,bodyLimit:16*1024,requestTimeout:30000});
+  const app=Fastify({logger:false,bodyLimit:16*1024,requestTimeout:120000});
   const rates=new Map<string,{count:number;expires:number}>();
   const connections=new Map<string,ConnectionState>();
   app.addHook('onRequest',async (_request,reply) => {
@@ -24,6 +26,8 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
       .header('X-Content-Type-Options','nosniff').header('X-Frame-Options','DENY');
   });
   app.setErrorHandler((_error,_request,reply) => { reply.code(400).send({error:'Request could not be completed. Check your input and try again.'}); });
+  if(assignments)registerAssignmentRoutes(app,config,assignments);
+  app.get('/privacy',async(_request,reply)=>reply.type('text/html; charset=utf-8').send('<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy · Moodle Calendar</title><h1>Moodle Calendar privacy</h1><p>Independent application by Tursunov Sunnatilla, not created by UWED. Contact: @sunnatilla_tursunov.</p><p>Passwords are used only for sign-in and are not stored. Moodle session cookies are not collected. Encrypted access tokens, your Telegram chat identifier, course snapshots, preferences and submission receipts support your connection. Analytics contain aggregate daily counts only, without names, Moodle usernames, files, cookies, or identifiers.</p><p>Uploaded work is held temporarily in server memory while it is sent to Moodle; it is not retained as a local file. Submission receipts record filenames, sizes and status to prevent duplicate writes. Files you send to Telegram are handled by Telegram. Verify important submissions directly in Moodle.</p><p>Disconnect in the bot to delete your connection and personal application records. This does not delete work already submitted to Moodle or messages already delivered to Telegram. Aggregate counts are retained for 90 days and cannot identify an individual.</p></html>'));
   app.get('/healthz',async () => ({ok:true}));
   app.get('/readyz',async (_request,reply) => {
     store.db.prepare('SELECT 1').get();
@@ -75,6 +79,7 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
       if(state){state.percent=100;state.status='complete';state.label='You’re connected.';state.expires=now+1200;}
       return {ok:true};
     } catch(error) {
+      store.metric('connection_failure');
       if(error instanceof MoodleError){const message=error.reason==='authentication'?'Moodle did not accept this sign-in. Check your Moodle username and password.':syncFailure(error);failed(message);return reply.code(error.reason==='network'?503:400).send({error:message,code:error.reason});}
       failed('Moodle could not be connected. Try again with a fresh connection link. Your previous data is preserved.');
       return reply.code(400).send({error:'Moodle could not be connected. Check your credentials and link expiry. Student web service permissions may need university IT support. Your previous data is preserved.'});

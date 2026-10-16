@@ -3,9 +3,11 @@ import { Store } from './store.ts';
 import { Vault, hashSecret, newSecret } from './security.ts';
 import { formatTime, priorityItems, isActionable } from './planning.ts';
 import type { Item, Messenger, MoodleGateway, ConnectionProgress } from './types.ts';
-import { findChanges, fingerprint, formatChanges } from './changes.ts';
+import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
+import { MoodleError } from './moodle.ts';
+import { assignmentLink } from './assignment-session.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
@@ -38,6 +40,7 @@ export class SyncService {
     this.store.patchStudent(id, {linkHash:hashSecret(raw),linkExpires:this.now()+900});
     return `${this.publicUrl}/connect#token=${raw}`;
   }
+  assignmentLink(id:number,key:string):string{return assignmentLink(this.store,this.publicUrl,id,key,this.now());}
   beginPairing(moodleToken: string): string {
     const raw=newSecret();
     this.store.setMeta('ownerPairing',JSON.stringify({hash:hashSecret(raw),expires:this.now()+900,cipher:this.vault.seal(moodleToken,'owner-pairing')}));
@@ -79,9 +82,10 @@ export class SyncService {
       progress?.('saving');
       this.store.transaction(() => {
         // Reconnecting can use a different Moodle identity: remove all previous account data.
-        for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
+        for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs','portal_sessions','submission_operations']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
         this.store.patchStudent(original.id,{moodleCipher:this.vault.seal(moodleToken,`moodle:${original.id}`),linkHash:null,linkExpires:null,calendarHash:null,calendarCipher:null,paused:false,initialized:false});
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
+        this.store.metric('connection_success',this.now());
         this.store.enqueue(original.id,`connected:${hash}`,'✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
       });
     });
@@ -120,7 +124,7 @@ export class SyncService {
   recentUpdates(id:number):string {
     const student=this.store.getStudent(id);if(!student)return 'Connect Moodle first.';
     const rows=this.store.recentChanges(id);
-    if(!rows.length)return '📰 Recent updates\n\nNo recorded website changes yet. Tap 🔄 Auto update to compare Moodle with your saved snapshot.';
+    if(!rows.length)return '📰 Recent updates\n\nNo recorded website changes yet. Tap 🔄 Sync to compare Moodle with your saved snapshot.';
     return '📰 Recent updates\n\n'+rows.map(({checkedAt,change})=>`${formatTime(checkedAt,student.timezone)} · ${change.courseName}\n${change.title}\n${change.details.map(detail=>'• '+detail).join('\n')}${change.url?'\n'+change.url:''}`).join('\n\n');
   }
   private async synchronize(id:number,manual:boolean,notify:boolean):Promise<RefreshResult|null> {
@@ -135,20 +139,25 @@ export class SyncService {
         const previousItems=this.store.rawItems(id);
         const previous = new Map(previousItems.map(i => [i.key,i]));
         const muted = new Set(this.store.courses(id).filter(c => c.muted).map(c => c.id));
-        const changes=s.initialized ? findChanges(previousItems,snapshot.items,s.timezone).filter(change=>!muted.has((snapshot.items.find(item=>item.key===change.key) || previous.get(change.key))!.courseId)) : [];
+        if(s.initialized && previousItems.some(item=>item.key.startsWith('assignment:')) && snapshot.warnings.some(w=>w.startsWith('Assignment details and deadlines are unavailable'))){const error=new MoodleError('Assignment API access was lost. The last complete snapshot is preserved.',false,'permission');error.operation='mod_assign_get_assignments';throw error;}
+        const allChanges=s.initialized ? [...findCourseChanges(this.store.courses(id),snapshot.courses),...findChanges(previousItems,snapshot.items,s.timezone)] : [];
+        const changes=manual?allChanges:allChanges.filter(change=>!muted.has(change.courseId??0));
         const notices: {key:string; text:string}[] = [];
         if(notify && !latest.paused)for(const change of changes){
-          const item=snapshot.items.find(item=>item.key===change.key) || previous.get(change.key)!;
-          const label=change.type==='removed'?'No longer available':change.type==='new'?'New '+item.kind:'Updated '+item.kind;
-          notices.push({key:`change:${change.key}:${fingerprint(item)}:${this.now()}:${change.type}`,text:`${label}: ${change.title}\n${change.courseName}\n${change.details.map(detail=>'• '+detail).join('\n')}\n${change.url}\n[${change.key}]`});
+          if(muted.has(change.courseId??0))continue;
+          const item=snapshot.items.find(item=>item.key===change.key) || previous.get(change.key);
+          const label=change.type==='removed'?'No longer available':change.type==='new'?'New '+(item?.kind||'course'):'Updated '+(item?.kind||'course');
+          notices.push({key:`change:${change.key}:${item?fingerprint(item):hashSecret(JSON.stringify(change))}:${this.now()}:${change.type}`,text:`${label}: ${change.title}\n${change.courseName}\n${change.details.map(detail=>'• '+detail).join('\n')}\n${change.url}\n[${change.key}]`});
         }
         this.store.saveSnapshot(id,snapshot,notices,this.now(),this.now()+this.pollSeconds+randomInt(0,30),changes);
-        return {checkedAt:this.now(),changes,baseline:!s.initialized};
+        this.store.metric('sync_success',this.now());if(snapshot.warnings.length)this.store.metric('sync_limited',this.now());
+        return {checkedAt:this.now(),changes,baseline:!s.initialized,warnings:snapshot.warnings,checked:checkedCoverage(snapshot)};
       } catch(error) {
         if (this.store.getStudent(id)?.moodleCipher!==s.moodleCipher) return null;
         const failedBefore = this.store.getStudent(id)?.lastError?.startsWith('Sync failed');
+        this.store.metric('sync_failure',this.now());
         this.store.patchStudent(id,{lastError:'Sync failed. '+syncFailure(error),nextSyncAt:this.now()+Math.min(3600,this.pollSeconds*(failedBefore?4:1))});
-        if (notify && !failedBefore) this.store.enqueue(id,`failure:${s.lastSyncAt || 0}`,'Moodle sync failed. I kept your last successful data. Tap 🔄 Auto update to try again, or check ⚙️ Settings → ℹ️ Status. Reconnect if your Moodle access has expired.');
+        if (notify && !failedBefore) this.store.enqueue(id,`failure:${s.lastSyncAt || 0}`,'Moodle sync failed. I kept your last successful data. Tap 🔄 Sync to try again, or check ⚙️ Settings → ℹ️ Status. Reconnect if your Moodle access has expired.');
         throw error instanceof Error ? error : new Error('Moodle sync failed. Previous data has been preserved.');
       }
     });

@@ -420,6 +420,11 @@ test('Mini App return refreshes the menu without trusting the payload for author
  await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
  s.connected(101);await s.bot.handle(payload(101));assert.ok(labels(s.sent.at(-1)!.options).includes('🔄 Sync'));
 });
+test('assignment rows open private native windows for only the requesting student and displayed page',async t=>{
+ const s=setup(t);const alice=s.connected(101,Array.from({length:8},(_,i)=>({...item('assignment:'+(i+1),'Essay '+i),submissionStatus:'outstanding' as const})));s.connected(202,[{...item('assignment:99','Bob private essay'),submissionStatus:'outstanding'}]);const links:{id:number;key:string}[]=[];s.services.assignmentLink=(id,key)=>{links.push({id,key});return 'https://calendar.test/assignment#session=private-'+id+'-'+key;};
+ await s.send(101,'⏳ Next deadlines');assert.equal(links.length,6);assert.ok(links.every(link=>link.id===alice.id));assert.ok(!labels(s.sent.at(-1)!.options).some(text=>text.includes('Bob private')));assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().filter(button=>button.web_app).length,6);
+ await s.send(101,'➡️ Next page');assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().filter(button=>button.web_app).length,2);await s.send(101,'⬅️ Main menu');assert.ok(!s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().some(button=>button.web_app));
+});
 test('reconnection opens a fresh native window and unconnected menus keep only Connect',async t=>{
  const s=setup(t);
  await s.send(101,'/start');await s.send(101,'⚙️ Settings');assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);

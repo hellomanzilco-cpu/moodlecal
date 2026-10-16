@@ -13,6 +13,7 @@ export interface BotServices {
   refresh?(studentId:number):Promise<string>;
   recentUpdates?(studentId:number):string;
   requestRefresh?(studentId:number):string;
+  assignmentLink?(studentId:number,key:string):string;
 }
 
 const HELP = `❓ How to use Moodle Calendar
@@ -73,6 +74,7 @@ export class Bot {
   private menus = new Map<number, MenuState>();
   private pages = new Map<number,{command:string;arg:string;offset:number;total:number}>();
   private connectionWindows = new Map<number,{url:string;expires:number}>();
+  private assignmentButtons=new Map<number,Item[]>();
 
   constructor(store: Store, messenger: Messenger, services: BotServices, defaultTimezone = 'Asia/Tashkent') {
     this.store = store;
@@ -107,14 +109,16 @@ export class Bot {
     let text=typeof message?.text==='string'?message.text.trim():null;
     const webApp=record(message?.web_app_data);
     if(text===null && typeof webApp?.data==='string'){
-      try{if(record(JSON.parse(webApp.data))?.action==='connected')text='/start';}catch{ /* Never trust Mini App data as account authorization. */ }
+      try{const action=record(JSON.parse(webApp.data))?.action;if(action==='connected')text='/start';else if(action==='assignment_updated')text='📝 Assignments';}catch{ /* Never trust Mini App data as account authorization. */ }
     }
     if (!message || !from || !chat || chat.type !== 'private' || from.is_bot === true ||
         !Number.isSafeInteger(from.id) || Number(from.id) <= 0 || from.id !== chat.id || text===null) {
       this.store.finishUpdate(updateId, nowSeconds());
       return;
     }
+    const isNew=!this.store.byTelegram(Number(from.id));
     const student = this.store.ensureStudent(Number(from.id), Number(chat.id), this.defaultTimezone);
+    if(isNew)this.store.metric('student_started');
     const reply = await this.route(student, text);
     // A transport retry must resend the same response, not repeat a class addition
     // or rotate a private calendar link for the same Telegram update.
@@ -150,6 +154,7 @@ export class Bot {
 
   private async route(student: Student, text: string): Promise<BotReply> {
     const id = student.id;
+    this.assignmentButtons.delete(id);
     const slash = /^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text);
     const courseButton = /^📘 (\d+):/.exec(text);
     let command = slash ? slash[1].toLowerCase() : BUTTON_COMMANDS[text];
@@ -210,6 +215,10 @@ export class Bot {
     if (this.store.getStudent(id)) this.menus.set(id, { menu });
     else this.menus.delete(id);
     const options=this.menuOptions(this.store.getStudent(id) ?? {...student,moodleCipher:null}, menu);
+    if(student.moodleCipher&&this.services.assignmentLink&&options.reply_markup){
+      const buttons=(this.assignmentButtons.get(id)||[]).filter(item=>/^assignment:[1-9]\d*$/.test(item.key)).map(item=>[{text:'📄 '+item.title.slice(0,48),web_app:{url:this.services.assignmentLink!(id,item.key)}}]);
+      options.reply_markup.keyboard.unshift(...buttons);
+    }
     const page=this.pages.get(id);
     if(page && page.total>6 && options.reply_markup){
       const navigation=[];
@@ -339,7 +348,8 @@ export class Bot {
         const filtered = assignments.filter(item => item.submissionStatus === status && (command === 'outstanding' ? currentWork(item) : command === 'upcoming' ? !currentWork(item) : true)).sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || a.title.localeCompare(b.title));
         const headings = { outstanding: '⏳ Next deadlines and unfinished overdue work', upcoming: '🕓 Later, undated, or unavailable assignments', awaiting: '📨 Submitted — awaiting grades', graded: '✅ Submitted — graded' };
         const page=this.page(id,command,arg,filtered);
-        return `${headings[command]}\n\n${filtered.length ? page.items.map(item => `${this.itemLine(item, student.timezone)}${item.dueAt === null ? '\nNo published deadline' : ''}${command === 'upcoming' ? accessLine(item) : ''}${command === 'graded' ? `\nGrade: ${item.grade || 'See Moodle for grade details'}` : ''}`).join('\n\n') : 'No assignments in this category.'}${page.footer}${unknownNotice}${this.coverage(student)}`;
+        this.assignmentButtons.set(id,page.items);
+        return `${headings[command]}\n\n${filtered.length ? page.items.map(item => `${this.itemLine(item, student.timezone)}${item.dueAt === null ? '\nNo published deadline' : ''}${command === 'upcoming' ? accessLine(item) : ''}${command === 'graded' ? `\nGrade: ${item.grade || 'See Moodle for grade details'}` : ''}`).join('\n\n') : 'No assignments in this category.'}${page.footer}${this.services.assignmentLink&&filtered.length?'\n\nTap a 📄 assignment button below to read the task and manage your submission.':''}${unknownNotice}${this.coverage(student)}`;
       }
       case 'done':
       case 'undo': {

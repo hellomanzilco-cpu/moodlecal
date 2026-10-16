@@ -6,6 +6,7 @@ import type { MoodleChangeEvent } from './moodle-events.ts';
 import type { WebsiteChange } from './changes.ts';
 
 type Row = Record<string, unknown>;
+const statisticsDay=(seconds:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(seconds*1000));
 function student(row: Row | undefined): Student | null {
   if (!row) return null;
   return { ...row, initialized: !!row.initialized, paused: !!row.paused } as unknown as Student;
@@ -58,10 +59,21 @@ export class Store {
         studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
         requestId TEXT NOT NULL,requestedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS portal_sessions(hash TEXT PRIMARY KEY,studentId INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,assignmentKey TEXT NOT NULL,connectionHash TEXT NOT NULL,expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS submission_operations(id TEXT PRIMARY KEY,studentId INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,assignmentKey TEXT NOT NULL,connectionHash TEXT NOT NULL,state TEXT NOT NULL,stage TEXT NOT NULL,message TEXT NOT NULL,proof TEXT NOT NULL,createdAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS submission_owner ON submission_operations(studentId,assignmentKey,createdAt);
+      CREATE TABLE IF NOT EXISTS usage_daily(day TEXT NOT NULL,event TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(day,event));
       PRAGMA user_version=1;`);
     if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
   }
   close() { this.db.close(); }
+  metric(event:string,now=Math.floor(Date.now()/1000)) {
+    if(!/^[a-z_]{1,40}$/.test(event))throw new Error('Invalid aggregate event');
+    const day=statisticsDay(now);
+    this.db.prepare('INSERT INTO usage_daily(day,event,count) VALUES(?,?,1) ON CONFLICT(day,event) DO UPDATE SET count=count+1').run(day,event);
+    this.db.prepare('DELETE FROM usage_daily WHERE day<?').run(statisticsDay(now-90*86400));
+  }
+  statistics(){return {students:this.db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN moodleCipher IS NOT NULL THEN 1 ELSE 0 END),0) AS connected,COALESCE(SUM(CASE WHEN paused=1 THEN 1 ELSE 0 END),0) AS paused FROM students').get(),daily:this.db.prepare('SELECT day,event,count FROM usage_daily ORDER BY day DESC,event').all(),dayTimeZone:'Asia/Tashkent',retentionDays:90,containsPersonalIdentifiers:false};}
   transaction<T>(work: () => T): T {
     if (this.db.isTransaction) return work();
     this.db.exec('BEGIN IMMEDIATE');

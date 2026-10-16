@@ -1,5 +1,13 @@
 # Pilot validation — 16 October 2026
 
+## Assignment and sync report update
+
+The expanded suite contains **124 passing tests**, with TypeScript checks passing. New checks cover exact file/time/instruction/course differences, limited coverage and failed API names, private assignment-session isolation, current teacher requirements, file/word/count limits, explicit review and replacement, multipart transfers, draft/final-submit warnings, byte-level saved-file verification, duplicate operation IDs, lost responses, restart recovery, disconnect races and aggregate-only analytics.
+
+A mobile browser test exercised the actual HTTP server with a synthetic Moodle adapter: task definition, protected download, delivery to the correct simulated Telegram chat, review without premature writes, statement acceptance, final submission, failure and closed-task restrictions. Telegram's SDK was simulated. No script errors occurred. No real coursework or test messages were sent to students.
+
+A real UWED student-token read confirmed the current assignment detail API, effective permissions and file-submission settings. Standard save/final-submit functions are advertised to this account, but real academic submissions were deliberately not performed. Synthetic tests do not prove every UWED plugin or account permission; unsupported configurations direct students to Moodle. See [assignment limits](ASSIGNMENTS.md).
+
 ## Refresh and outage behavior
 
 The displayed update time is the last **successful** Moodle snapshot, not the time a menu is opened. A failed request preserves the previous snapshot and timestamp, records a separate attempt time, and reports the failure. It must never claim a successful refresh during an outage.

@@ -7,6 +7,7 @@ import { TelegramClient, TelegramError } from './telegram.ts';
 import { Bot } from './bot.ts';
 import { SyncService } from './sync.ts';
 import { createApp } from './api.ts';
+import {AssignmentService} from './assignments.ts';
 
 async function main() {
   const config=loadConfig();
@@ -16,6 +17,7 @@ async function main() {
   const telegram=config.telegramToken ? new TelegramClient(config.telegramToken) : null;
   const messenger=telegram || {async send() { throw new Error('Telegram is not configured.'); }};
   const service=new SyncService(store,vault,moodle,messenger,config.publicUrl,config.pollSeconds);
+  const assignments=new AssignmentService(store,vault,moodle,messenger);
   const bot=new Bot(store,messenger,service,config.timezone);
   let queue=Promise.resolve();
   const handleUpdate=(update:unknown) => {
@@ -32,7 +34,7 @@ async function main() {
     });
     queue=task.catch(() => {});return task;
   };
-  const app=createApp(config,store,service,moodle,handleUpdate);
+  const app=createApp(config,store,service,moodle,handleUpdate,assignments);
   const controller=new AbortController();
   const {signal}=controller;
   if (telegram && config.telegramMode==='polling') {
@@ -72,6 +74,6 @@ async function main() {
   const stop=() => controller.abort();
   process.once('SIGINT',stop); process.once('SIGTERM',stop);
   await new Promise<void>(resolve => signal.addEventListener('abort',()=>resolve(),{once:true}));
-  await app.close(); await Promise.allSettled(tasks); await queue; await service.drain(); store.close();
+  await app.close(); await Promise.allSettled(tasks); await queue; await service.drain();await assignments.drain(); store.close();
 }
 main().catch(() => { console.error('Moodle Calendar failed to start. Check environment configuration, database access, and Telegram webhook mode.');process.exitCode=1; });

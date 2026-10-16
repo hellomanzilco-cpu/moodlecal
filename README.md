@@ -33,6 +33,9 @@ For your own pilot account, run `npm run account:link`. Open the private link in
 - Uses persistent emoji buttons for navigation and groups assignments into outstanding, submitted awaiting grades, and submitted graded work.
 - Focuses on the next open deadline per course, plus unfinished overdue work that remains accessible. Later and undated assignments have a separate view; submitting early does not advance to the following deadline.
 - Provides **🔄 Sync** to fetch and explain website changes, and **📰 Recent updates** to review each student's saved change history.
+- Names added, removed and revised documents, shows old/new deadlines, grades, instructions and course changes, and identifies failed checks or coverage limits in each sync report.
+- Opens assignments inside Telegram to read fresh requirements, download task files or send them to the student's chat, and review supported file/online-text submissions before sending them to Moodle.
+- Confirms submission status and saved file checksums before showing success. Analytics use aggregate counts without names, usernames, passwords or session cookies.
 - Evaluates 24-hour / 1-hour reminders from cached active deadlines locally, without requesting Moodle on a timer. Stale or failed data can suppress reminders.
 - Publishes a revocable private ICS calendar containing deadlines and classes.
 - Lets students add a recurring timetable when Moodle does not supply scheduled class times.
@@ -122,7 +125,17 @@ Slash commands remain available for compatibility and advanced controls:
 | `/pause`, `/resume` | Pause or resume event processing and alerts; resuming explicitly refreshes your account. |
 | `/disconnect` | Immediately delete your local connection and student data and revoke your feed. |
 
-Use the exact course ID or item key shown by the bot. A personal done mark affects the assistant; submitting work still happens in Moodle.
+Use the exact course ID or item key shown by the bot. A personal done mark affects the assistant; it does not submit coursework. Actual submissions use the explicit assignment window or the university website.
+
+## Assignment files and submission
+
+Choose **📝 Assignments → a category → 📄 an assignment**. The private window reads the current task definition, attachments, deadline, effective access, submission status and visible grade directly from Moodle. File buttons download an attachment or send its bytes to your own Telegram chat; Moodle tokens and private file URLs never reach the browser or Telegram.
+
+Select your work, read any teacher statement, review filenames and requirements, then explicitly confirm **Submit for grading**. The server rechecks requirements before saving and uses Moodle's own draft/save/final-submit APIs. Success requires reading back the official submitted status and downloading the saved files to verify their SHA-256 hashes against the selected files. The bot sends a receipt and asks you to check Moodle yourself and keep a backup.
+
+The bot accepts up to **10 files / 20 MiB total**, subject to stricter teacher file count, per-file size, formats, word limit, opening/cutoff and editing permissions. Replacing existing work needs an explicit replacement confirmation. Group/timed assignments, unsupported plugins or file-type groups, and larger files must use Moodle. A draft is never presented as submitted. An uncertain write is not retried; verify its status first. [Detailed behavior and recovery](docs/ASSIGNMENTS.md).
+
+The public `/privacy` page explains account data and aggregate analytics. Operators can run `npm run stats` locally or `node /app/scripts/stats.mjs` through authenticated Railway SSH for aggregate connection, sync, download and submission counts. There is no public statistics or student roster endpoint.
 
 Example timetable entry, using a course ID from **📚 My courses**:
 

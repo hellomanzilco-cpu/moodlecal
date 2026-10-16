@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY src ./src
-COPY scripts/backup.mjs ./scripts/backup.mjs
+COPY scripts/backup.mjs scripts/stats.mjs ./scripts/
 RUN mkdir -p /app/data && chown node:node /app/data
 USER node
 EXPOSE 3000

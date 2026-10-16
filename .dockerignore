@@ -9,4 +9,6 @@ coverage
 tests
 scripts/*
 !scripts/backup.mjs
+!scripts/stats.mjs
+/images.png
 docs

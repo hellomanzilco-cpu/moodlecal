@@ -1,4 +1,5 @@
-import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress } from './types.ts';
+import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress,AssignmentDetail,AssignmentFile,AssignmentGateway,SubmissionFile } from './types.ts';
+import {readAssignment,submissionParameters,requireNoWriteWarnings,trustedFile} from './assignment-moodle.ts';
 
 type RecordValue = Record<string, unknown>;
 type Parameter = string | number | boolean | Parameter[] | { [key: string]: Parameter };
@@ -162,12 +163,13 @@ function files(...collections: unknown[]): NonNullable<Item['files']> {
 }
 
 /**
- * Read-only student adapter. It observes only content exposed to that token.
+ * Student adapter. Snapshot reads observe only content exposed to that token;
+ * assignment writes are invoked only by the separate, explicit submission flow.
  * Polling cannot see hidden content or changes between scans; unsupported plugin
  * activities have generic course-content coverage. Moodle enrolments are courses,
  * not a class timetable. Group calendars need the optional group discovery API.
  */
-export class MoodleClient implements MoodleGateway {
+export class MoodleClient implements MoodleGateway,AssignmentGateway {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
@@ -191,7 +193,7 @@ export class MoodleClient implements MoodleGateway {
       });
       if (!response.ok) {
         throw new MoodleError(
-          response.status === 429 ? 'Moodle is busy. Synchronization will retry later.' : 'Moodle could not be reached. Please try again.',
+          response.status === 429 ? 'Moodle is busy. Please try again later.' : 'Moodle could not be reached. Please try again.',
           response.status === 429 || response.status >= 500,
         );
       }
@@ -215,7 +217,7 @@ export class MoodleClient implements MoodleGateway {
           throw new MoodleError('Moodle returned an API error. Please try again or reconnect your account.', true);
         }
         if (result.warnings !== undefined && list(result.warnings).some(w=>!allowWarning?.(object(w)))) {
-          const error=new MoodleError('Moodle returned incomplete data. Synchronization will retry without replacing your saved data.', true);
+          const error=new MoodleError('Moodle returned incomplete data. Your saved snapshot will not be replaced.', true);
           error.warningCodes=list(result.warnings).map(w=>String(object(w).warningcode ?? 'unknown')).map(code=>/^[a-zA-Z0-9_-]{1,80}$/.test(code)?code:'unknown');
           throw error;
         }
@@ -268,6 +270,46 @@ export class MoodleClient implements MoodleGateway {
       parsed.hash = '';
       return parsed.href;
     } catch { return fallback; }
+  }
+
+  async assignment(token:string,assignmentId:number,courseId:number,now:number):Promise<AssignmentDetail>{
+    return readAssignment({baseUrl:this.baseUrl,identify:value=>this.identify(value),call:(value,name,params,allowWarning)=>this.call(value,name,params,allowWarning)},token,assignmentId,courseId,now,assignmentAccess);
+  }
+  async download(token:string,file:AssignmentFile,maxBytes:number):Promise<Buffer>{
+    const trusted=trustedFile(this.baseUrl,{filename:file.name,fileurl:file.url,filesize:file.size});
+    if(!trusted||file.size>maxBytes)throw new MoodleError('This file cannot be downloaded here. Open it directly in Moodle.');
+    try{
+      const url=new URL(trusted.url);url.searchParams.set('token',token);url.searchParams.set('forcedownload','1');
+      const response=await this.fetchImpl(url,{redirect:'error',signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS)});
+      if(!response.ok||!response.body)throw new MoodleError('Moodle did not allow this file download.',false,'permission');
+      if(Number(response.headers.get('content-length'))>maxBytes)throw new MoodleError('This file exceeds the bot download limit. Open Moodle to download it.');
+      const reader=response.body.getReader(),chunks:Buffer[]=[];let size=0;
+      try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>maxBytes){await reader.cancel();throw new MoodleError('This file exceeds the bot download limit. Open Moodle to download it.');}chunks.push(Buffer.from(part.value));}}finally{reader.releaseLock();}
+      const bytes=Buffer.concat(chunks);const contentType=response.headers.get('content-type')||'';
+      if(contentType.includes('application/json')){try{const data=JSON.parse(bytes.toString());if(data.exception||data.errorcode||data.error)throw new MoodleError('Moodle did not allow this file download.',false,'permission');}catch(error){if(error instanceof MoodleError)throw error;}}
+      if(file.size>0&&bytes.length!==file.size)throw new MoodleError('Moodle returned an incomplete or changed file. Refresh this assignment before downloading again.',true);
+      if(contentType.includes('text/html')&&file.mime!=='text/html')throw new MoodleError('Moodle returned a login page instead of the file. Reconnect or open Moodle.',false,'authentication');
+      return bytes;
+    }catch(error){if(error instanceof MoodleError)throw error;throw new MoodleError('Moodle file download was interrupted. Please try again.',true,'network');}
+  }
+  async uploadDraft(token:string,files:SubmissionFile[]):Promise<number>{
+    let draftId=0;
+    for(const file of files){try{
+      const form=new FormData();form.set('token',token);form.set('itemid',String(draftId));form.set('filepath','/');form.set('file_1',new Blob([new Uint8Array(file.bytes)],{type:file.mime} ),file.name);
+      const response=await this.fetchImpl(this.baseUrl+'/webservice/upload.php',{method:'POST',body:form,redirect:'error',signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS)});
+      if(!response.ok)throw new MoodleError('Moodle rejected the file upload. Check its upload limits and try directly in Moodle.',false,'permission');
+      const data:unknown=await response.json();if(!Array.isArray(data)||data.length!==1)throw new MoodleError('Moodle did not confirm the draft file upload. No final submission was requested.');
+      const uploaded=object(data[0]);const returnedId=id(uploaded.itemid);
+      if(uploaded.component!=='user'||uploaded.filearea!=='draft'||uploaded.filename!==file.name||(draftId!==0&&draftId!==returnedId))throw new MoodleError('Moodle returned an unexpected upload receipt. No final submission was requested.');
+      draftId=returnedId;
+    }catch(error){if(error instanceof MoodleError)throw error;throw new MoodleError('Moodle upload was interrupted. Check your connection before trying again.',true,'network');}}
+    if(!draftId)throw new MoodleError('Choose a file before uploading.');return draftId;
+  }
+  async saveSubmission(token:string,assignmentId:number,draftId:number|null,text:string|undefined):Promise<void>{
+    requireNoWriteWarnings(await this.call(token,'mod_assign_save_submission',submissionParameters(assignmentId,draftId,text)));
+  }
+  async submitForGrading(token:string,assignmentId:number,acceptStatement:boolean):Promise<void>{
+    requireNoWriteWarnings(await this.call(token,'mod_assign_submit_for_grading',{assignmentid:assignmentId,acceptsubmissionstatement:acceptStatement}));
   }
 
   async snapshot(token: string, now: number, assignmentsOnly=false,progress?:ConnectionProgress): Promise<Snapshot> {
