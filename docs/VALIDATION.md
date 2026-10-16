@@ -20,4 +20,10 @@ During this investigation, both the Railway container and the local computer res
 
 Run `npm run check` and `npm test` for API consent/origin validation, tenant isolation, token encryption, assignment statuses and access, calendar revocation and escaping, time zones, timetable commands, queue recovery, sync deduplication, pagination, alert pause behavior, event signatures and event job retries, backup integrity, and fresh startup.
 
-Cloud verification uses the deployed code with an in-memory synthetic account and a fake messenger; it does not send test messages to students or alter their Moodle data. Real Moodle refresh/login remains blocked while the university site is unavailable and must be retried once it recovers.
+Cloud verification uses the deployed code with an in-memory synthetic account and a fake messenger; it does not send test messages to students or alter their Moodle data. Real Moodle refresh/login was retried after the university site recovered, as recorded below.
+
+### Completed checks
+
+All **92 automated tests** and TypeScript checks passed. The deployed container passed a synthetic smoke check covering 14 menu actions, the six-button main menu, queued sync success, and outage handling. Health, readiness, and the connection page returned HTTP 200.
+
+Moodle recovered during verification. A real API authentication succeeded from Railway, and both connected accounts refreshed successfully. The older account's last successful update advanced from **16 October 2026, 00:32** to **11:45 Asia/Tashkent**, with seven courses and 213 items retained. The second account also refreshed successfully. University uptime remains external to the bot; future failed requests preserve the last successful snapshot.

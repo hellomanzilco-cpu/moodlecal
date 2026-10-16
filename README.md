@@ -89,14 +89,14 @@ Press Start to open the persistent keyboard. Connected students see six buttons:
 | 🔄 Sync | Pull current Moodle data and show what changed since the last successful check. |
 | 📰 Recent updates | Read your saved website change history. |
 | 🗓 Calendar | Your private calendar subscription URL. |
-| ⚙️ Settings | Alerts, time zone, manual sync, connection status, and disconnect. |
+| ⚙️ Settings | Alerts, time zone, connection status, reconnect, help, and disconnect. |
 | 🔗 Connect Moodle | A temporary private browser connection link. |
 
 Under **📝 Assignments**, choose **⏳ Next deadlines**, **🕓 Later / undated**, **📨 Awaiting grades**, or **✅ Graded**. The nearest future deadline in each course determines its current assignment group; tied deadlines stay together, and early submission does not advance the next group before that deadline passes. Accessible unfinished overdue work remains visible. This is a planning rule, not proof that a teacher released an assignment. Drafts remain outstanding; a zero grade counts as graded. Missing access information is reported without guessing. Personal done marks do not submit work or modify grades.
 
 Moodle's effective access/permission result, opening time, cutoff, and conditional restrictions determine technical availability. An assignment without a deadline appears in **🕓 Later / undated**, outside current priorities, reminders, and the calendar. The bot invents no deadline.
 
-Under **⚙️ Settings**, use **🔔 Pause alerts** or **🔔 Resume alerts**, **🌍 Time zone**, **🔄 Sync**, and **ℹ️ Status**. Time zone prompts you to type an IANA zone such as `Asia/Tashkent`. **🔒 Disconnect** opens a confirmation; **🗑 Yes, disconnect** deletes your saved connection and personal data, while **⬅️ Main menu** cancels.
+Under **⚙️ Settings**, use **🔔 Pause alerts** or **🔔 Resume alerts**, **🌍 Time zone**, **🔗 Reconnect Moodle**, and **ℹ️ Status**. Time zone prompts you to type an IANA zone such as `Asia/Tashkent`. **🔒 Disconnect** opens a confirmation; **🗑 Yes, disconnect** deletes your saved connection and personal data, while **⬅️ Main menu** cancels.
 
 Slash commands remain available for compatibility and advanced controls:
 
