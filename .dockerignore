@@ -1,0 +1,12 @@
+node_modules
+data
+.git
+.env
+.env.*
+!.env.example
+coverage
+*.log
+tests
+scripts/*
+!scripts/backup.mjs
+docs

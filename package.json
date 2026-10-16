@@ -1,0 +1,29 @@
+{
+  "name": "moodle-calendar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.14.0 <25" },
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/main.ts",
+    "start": "node --env-file=.env src/main.ts",
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "setup": "node scripts/setup.mjs",
+    "diagnose": "node scripts/diagnose.mjs",
+    "account:check": "node scripts/check-account.mjs",
+    "bot:info": "node scripts/bot-info.mjs",
+    "account:link": "node scripts/link-account.mjs",
+    "sync:once": "node scripts/refresh-once.mjs",
+    "backup": "node scripts/backup.mjs"
+  },
+  "dependencies": {
+    "fastify": "^5.6.2",
+    "luxon": "^3.7.2"
+  },
+  "devDependencies": {
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,35 @@
+# This creates paid resources only when applied to your Render account.
+services:
+  - type: web
+    name: moodle-calendar
+    runtime: node
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: off
+    buildCommand: npm ci --omit=dev --ignore-scripts
+    startCommand: node src/main.ts
+    healthCheckPath: /healthz
+    disk:
+      name: moodle-calendar-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_PATH
+        value: /var/data/moodle-calendar.sqlite
+      - key: TELEGRAM_MODE
+        value: polling
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: MOODLE_EVENT_SECRET
+        generateValue: true
+      - key: DEFAULT_TIMEZONE
+        value: Asia/Tashkent
+      - key: MOODLE_URL
+        value: https://moodle.uwed.uz
