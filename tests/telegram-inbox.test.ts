@@ -63,15 +63,13 @@ test('queued updates retain encrypted minimal payload, omit Telegram identity me
  inbox.accept([update],true);await settle(inbox);assert.equal(received.length,1);
 });
 
-test('credential messages bypass the durable inbox and preserve the Telegram message id for deletion',async t=>{
+test('unstructured Telegram text is handled transiently without writing its contents to the durable inbox',async t=>{
  const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),received:unknown[]=[];
- const secret='private-moodle-password-not-for-sqlite';
+ const secret='accidentally-pasted-moodle-password';
  const inbox=new TelegramInbox(store,vault,async value=>{received.push(value);store.finishUpdate((value as {update_id:number}).update_id,NOW);},()=>NOW,()=>true);
  t.after(async()=>{await inbox.drain();store.close();});
- inbox.accept([{...message(81,101,secret),message:{...message(81,101,secret).message,message_id:123}}],true);
- await settle(inbox);
- assert.equal(pending(store),0);assert.equal(store.hasUpdate(81),true);
- assert.deepEqual(received[0],{update_id:81,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},message_id:123,text:secret}});
+ inbox.accept([message(81,101,secret)],true);await settle(inbox);
+ assert.equal(pending(store),0);assert.equal(store.hasUpdate(81),true);assert.equal(received.length,1);
  assert.doesNotMatch(JSON.stringify(store.db.prepare('SELECT * FROM telegram_inbox').all()),new RegExp(secret));
 });
 

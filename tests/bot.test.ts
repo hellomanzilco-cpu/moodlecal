@@ -9,7 +9,6 @@ import {Vault} from '../src/security.ts';
 import {ProfileSharingService} from '../src/profile-sharing.ts';
 import type { BotServices } from '../src/bot.ts';
 import type { Item, MessageOptions, Messenger, Student } from '../src/types.ts';
-import type {ConnectionState} from '../src/connection-progress.ts';
 
 const now = () => Math.floor(Date.now() / 1000);
 function item(key: string, title = key): Item {
@@ -327,9 +326,9 @@ test('bot accepts only a real student in their private chat', async t => {
   assert.equal(s.store.byTelegram(101), null);
   await s.send(101, '/connect');
   assert.equal(s.sent.length, 1);
-  assert.deepEqual(s.calls.connect, []);
-  assert.match(s.sent[0].text, /Send your Moodle username in this private chat/);
-  assert.equal(s.sent[0].options!.reply_markup!.keyboard[0][0].web_app, undefined);
+  assert.deepEqual(s.calls.connect, [s.store.byTelegram(101)!.id]);
+  assert.match(s.sent[0].text, /private sign-in window inside Telegram/);
+  assert.match(s.sent[0].options!.reply_markup!.keyboard[0][0].web_app!.url, /^https:\/\//);
 });
 
 test('bot remembers successful updates and retries failed delivery', async t => {
@@ -377,7 +376,7 @@ test('private calendar requires connection, rotation is explicit, and credential
   assert.deepEqual(s.calls.calendar, [{ id: student.id, rotate: false }, { id: student.id, rotate: true }]);
   const response = await s.send(101, 'my-password-secret');
   assert.doesNotMatch(response, /my-password-secret/);
-  assert.match(response, /private Telegram chat/);
+  assert.match(response, /never send Moodle passwords or tokens in chat/i);
 });
 
 test('disconnect removes all personal data, calendar access, and pending notices', async t => {
@@ -596,63 +595,17 @@ test('assignment responses show compact Tashkent deadlines, confirmed availabili
   assert.match(stale, /⚠️ <b>Showing saved data<\/b>\nThe latest synchronization failed\. Verify deadlines in Moodle\./);
   assert.doesNotMatch(stale, /private Moodle diagnostics/);
 });
-test('new students connect from a plain Telegram button with an explicit private-chat disclosure',async t=>{
+test('new students connect inside the Telegram Web App without requesting credentials in chat',async t=>{
  const s=setup(t);const welcome=await s.send(101,'/start');assert.match(welcome,/Connect your Moodle account/);assert.match(welcome,/assignment deadlines/);assert.doesNotMatch(welcome,/\/class|\/mute/);
  assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
  assert.match(welcome,/Tursunov Sunnatilla/);assert.match(welcome,/not created by UWED/i);assert.match(welcome,/@sunnatilla_tursunov/);
- assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app,undefined);
- const prompt=await s.send(101,'🔗 Connect Moodle');assert.match(prompt,/Send your Moodle username in this private chat/);assert.match(prompt,/By sending it, you agree/);assert.match(prompt,/does not store your password/);assert.doesNotMatch(prompt,/https?:\/\//);
- assert.equal(s.calls.connect.length,0);
-});
-test('Connect Moodle receives credentials in chat, deletes the password message and edits real progress before sending the dashboard',async t=>{
- const s=setup(t);await s.send(101,'/start');
- const base:ConnectionState={phase:'connecting',percent:0,label:'',status:'working',serverStatus:'pending',authStatus:'not_started',profileStatus:'not_started',syncStatus:'not_started',dashboardStatus:'not_started',linkHash:'private-link-hash',expires:now()+900};
- const state=(overrides:Partial<ConnectionState>):ConnectionState=>({...base,...overrides});
- const username='moodle_student_7',password='  private password  ';
- s.bot.setConnectionRunner(async(studentId,receivedUsername,receivedPassword,onProgress)=>{
-  assert.equal(studentId,s.store.byTelegram(101)!.id);assert.equal(receivedUsername,username);assert.equal(receivedPassword,password);
-  await onProgress(state({phase:'connecting',serverStatus:'pending'}));
-  await onProgress(state({phase:'authenticating',serverStatus:'reachable',authStatus:'pending'}));
-  await onProgress(state({phase:'profile',serverStatus:'reachable',authStatus:'verified',profileStatus:'pending'}));
-  await onProgress(state({phase:'synchronizing',serverStatus:'reachable',authStatus:'verified',profileStatus:'loaded',syncStatus:'pending'}));
-  const dashboard=state({phase:'dashboard',serverStatus:'reachable',authStatus:'verified',profileStatus:'loaded',syncStatus:'complete',dashboardStatus:'pending'});
-  await onProgress(dashboard);
-  s.store.patchStudent(studentId,{moodleCipher:'encrypted-moodle-token'});
-  s.store.saveSnapshot(studentId,{courses:[{id:5,name:'Economics',shortname:'ECON'}],items:[item('assignment:501','Moodle essay')],warnings:[]},[],now(),now());
-  const complete=state({phase:'dashboard',percent:100,status:'complete',serverStatus:'reachable',authStatus:'verified',profileStatus:'loaded',syncStatus:'complete',dashboardStatus:'prepared'});
-  await onProgress(complete);return {status:'complete',state:complete};
- });
- await s.bot.handle(s.update(101,'🔗 Connect Moodle'));
- assert.doesNotMatch(s.sent.at(-1)!.text,/https?:\/\//);assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().some(button=>!!button.web_app),false);
- await s.bot.handle(s.update(101,username));assert.match(s.sent.at(-1)!.text,/Now send your Moodle password/);assert.doesNotMatch(s.sent.at(-1)!.text,new RegExp(username));
- assert.match(s.sent.at(-1)!.options!.reply_markup!.input_field_placeholder!,/Type your Moodle password/);
- await s.bot.handle(s.update(101,'🔗 Connect Moodle'));assert.match(s.sent.at(-1)!.text,/Type your Moodle password as a separate message/);
- await s.bot.handle(s.update(101,password,{message_id:777}));await s.bot.drain();
- assert.deepEqual(s.deleted,[{chatId:101,messageId:777}]);
- const updates=s.edited.map(entry=>entry.text).join('\n');
- for(const label of ['Connecting to the Moodle server','Verifying credentials','Loading the student profile','Synchronizing assignments','Preparing the dashboard'])assert.match(updates,new RegExp(label));
- const allText=[...s.sent.map(entry=>entry.text),...s.edited.map(entry=>entry.text)].join('\n');
- assert.match(allText,/ASSIGNMENTS DASHBOARD/);assert.doesNotMatch(allText,/Moodle essay/);assert.doesNotMatch(allText,new RegExp(username));assert.doesNotMatch(allText,/private password/);
- assert.equal(Number(s.store.db.prepare('SELECT COUNT(*) AS count FROM replies').get()?.count),0);
- const assignments=await s.send(101,'/unverified');assert.match(assignments,/Moodle essay/);
-});
-test('a failed initial progress send does not prevent the Moodle connection attempt',async t=>{
- const s=setup(t);await s.send(101,'/start');await s.send(101,'🔗 Connect Moodle');await s.send(101,'student');
- const messenger=(s.bot as unknown as {messenger:Messenger}).messenger;
- messenger.sendWithId=async()=>{throw new Error('temporary Telegram send failure');};
- let ran=false;s.bot.setConnectionRunner(async()=>{ran=true;return {status:'failed',error:'Synthetic safe connection error'};});
- await s.bot.handle(s.update(101,'password-text',{message_id:779}));await s.bot.drain();
- assert.equal(ran,true);assert.match(s.sent.map(value=>value.text).join('\n'),/Synthetic safe connection error/);
- assert.doesNotMatch(JSON.stringify(s.sent),/password-text/);
-});
-test('failed in-chat Moodle sign-in reports the cause and does not send an assignment dashboard',async t=>{
- const s=setup(t);await s.send(101,'🔗 Connect Moodle');await s.send(101,'student');
- const failed:ConnectionState={phase:'authenticating',percent:20,label:'',status:'failed',serverStatus:'reachable',authStatus:'rejected',profileStatus:'not_started',syncStatus:'not_started',dashboardStatus:'not_started',error:'Moodle rejected the supplied username or password. Check them and try again.',linkHash:'private-link',expires:now()+900};
- s.bot.setConnectionRunner(async(_id,_username,_password,onProgress)=>{await onProgress(failed);return {status:'failed',state:failed,error:failed.error};});
- await s.bot.handle(s.update(101,'incorrect-secret',{message_id:778}));await s.bot.drain();
- assert.deepEqual(s.deleted,[{chatId:101,messageId:778}]);assert.match(s.edited.at(-1)!.text,/Moodle rejected the supplied username or password/);assert.doesNotMatch(s.sent.map(value=>value.text).join('\n'),/ASSIGNMENTS DASHBOARD/);assert.doesNotMatch(JSON.stringify(s.sent),/incorrect-secret/);
-});
-test('Mini App return refreshes the menu without trusting the payload for authorization',async t=>{
+ assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
+ assert.equal(s.bot.isTransientChatText(s.update(101,'accidentally pasted credential')),true);assert.equal(s.bot.isTransientChatText(s.update(101,'/help')),false);
+ const prompt=await s.send(101,'/connect');assert.match(prompt,/private sign-in window inside Telegram/);assert.doesNotMatch(prompt,/https?:\/\//);
+ assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
+ const accidental=await s.send(101,'my Moodle username');assert.match(accidental,/never send Moodle passwords or tokens in chat/i);assert.doesNotMatch(accidental,/my Moodle username/);
+ assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
+});test('Mini App return refreshes the menu without trusting the payload for authorization',async t=>{
  const s=setup(t);
  const payload=(id:number)=>({update_id:id,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'connected'}),button_text:'🔗 Connect Moodle'}}});
  await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
@@ -688,6 +641,6 @@ test('reconnection keeps the existing Connect button inside Telegram',async t=>{
  await s.send(101,'/start');await s.send(101,'⚙️ Settings');assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
  s.connected(101);await s.send(101,'🔗 Reconnect Moodle');
  assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','⬅️ Main menu']);
- assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app,undefined);
+ assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
  const generated=s.calls.connect.length;await s.send(101,'⬅️ Main menu');assert.equal(s.calls.connect.length,generated);
 });

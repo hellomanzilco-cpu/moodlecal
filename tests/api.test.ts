@@ -20,11 +20,14 @@ function fixture() {
   const s=store.ensureStudent(111,111);const raw=new URLSearchParams(new URL(service.connectLink(s.id)).hash.slice(1)).get('token')!;
   return {config,store,service,app,s,raw,updates,get usedPassword(){return usedPassword;},set fail(value:boolean){fail=value;}};
 }
-test('external connection form is retired and directs students back to the Telegram conversation',async t => {
+test('connection page opens as the Telegram Web App and keeps its one-time token out of the page body',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
-  const response=await f.app.inject({url:'/connect'});assert.equal(response.statusCode,410);
-  assert.match(response.body,/private Telegram bot chat/);assert.doesNotMatch(response.body,/<form|type="password"|telegram-web-app|history\.replaceState|https:\/\//i);
-  const privacy=await f.app.inject({url:'/privacy'});assert.equal(privacy.statusCode,200);assert.match(privacy.body,/Passwords sent in the private Telegram bot chat pass through Telegram/);assert.match(privacy.body,/Optional profile sharing is off by default/);assert.match(privacy.body,/saved encrypted, separately from analytics/);assert.match(privacy.body,/Stop sharing, reconnect or disconnect/);
+  const response=await f.app.inject({url:'/connect'});assert.equal(response.statusCode,200);
+  assert.match(String(response.headers['content-security-policy']),/frame-ancestors https:\/\/web\.telegram\.org/);
+  assert.ok(!response.body.includes(f.raw));assert.match(response.body,/history\.replaceState/);assert.match(response.body,/telegram-web-app\.js/);
+  assert.match(response.body,/id="username"/);assert.match(response.body,/id="password"/);assert.match(response.body,/id="consent"/);
+  assert.match(response.body,/data-phase="connecting"/);assert.match(response.body,/data-phase="authenticating"/);assert.match(response.body,/data-phase="profile"/);assert.match(response.body,/data-phase="synchronizing"/);assert.match(response.body,/data-phase="dashboard"/);
+  const privacy=await f.app.inject({url:'/privacy'});assert.equal(privacy.statusCode,200);assert.match(privacy.body,/Passwords entered in the Telegram Web App pass to the bot server/);assert.match(privacy.body,/Optional profile sharing is off by default/);assert.match(privacy.body,/saved encrypted, separately from analytics/);assert.match(privacy.body,/Stop sharing, reconnect or disconnect/);
 });
 test('connection progress belongs to its private attempt, follows actual stages and completes only after saving',async t=>{
  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});

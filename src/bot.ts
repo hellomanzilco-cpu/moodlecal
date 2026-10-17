@@ -5,8 +5,6 @@ import type { Item, MessageOptions, Messenger, MoodleProfile, SharedProfilePage,
 import { syncFailure } from './sync-errors.ts';
 import {formatStatistics} from './statistics.ts';
 import {profileField} from './profile-sharing.ts';
-import type {ConnectionState} from './connection-progress.ts';
-import type {TelegramConnectionOutcome,TelegramConnectionRunner} from './telegram-connection.ts';
 
 export interface BotServices {
   connectLink(studentId: number): string;
@@ -39,7 +37,7 @@ Contact: @sunnatilla_tursunov
 More contains your profile, weekly plan, priorities, preparation, calendar and recent changes.
 Settings contains your connection, alerts and time zone.
 
-For Connect Moodle, use a private chat. The password message passes through Telegram to the bot server for sign-in only; the app does not store it and will try to delete the message after processing. Automatic website alerts require UWED’s event integration.`;
+For Connect Moodle, open the private sign-in window inside Telegram. Your password is used only to sign in and is not stored. Automatic website alerts require UWED’s event integration.`;
 
 const MAIN_BUTTONS = [
   ['🏠 Today', '📝 Assignments'],
@@ -70,7 +68,7 @@ const BUTTON_COMMANDS: Record<string, string> = {
 };
 type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics' | 'sharing' | 'users';
 interface MenuState { menu: Menu; expiresAt?: number }
-interface BotReply { text: string; options: MessageOptions; sensitive?:boolean;afterSend?:(messageId:number|null)=>Promise<void> }
+interface BotReply { text: string; options: MessageOptions; sensitive?:boolean }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
   keyboard: rows.map(row => row.map(text => ({ text }))), resize_keyboard: true, is_persistent: true,
   one_time_keyboard: false, input_field_placeholder: placeholder,
@@ -100,9 +98,7 @@ export class Bot {
   private manualSyncs = new Map<number, number>();
   private menus = new Map<number, MenuState>();
   private pages = new Map<number,{command:string;arg:string;offset:number;total:number}>();
-  private connectionInputs = new Map<number,{stage:'username'|'password';username:string;expires:number}>();
-  private connectionTasks=new Set<Promise<void>>();
-  private connectionRunner:TelegramConnectionRunner|null=null;
+  private connectionWindows = new Map<number,{url:string;expires:number}>();
   private assignmentButtons=new Map<number,Item[]>();
   private ownerTelegramId:number|null;
   private statisticsDays=new Map<number,1|7>();
@@ -115,15 +111,14 @@ export class Bot {
     this.ownerTelegramId=typeof ownerTelegramId==='number'&&Number.isSafeInteger(ownerTelegramId)&&ownerTelegramId>0?ownerTelegramId:null;
   }
 
-  setConnectionRunner(runner:TelegramConnectionRunner):void{this.connectionRunner=runner;}
-  expectsTransientCredential(update:unknown):boolean{
-    const envelope=record(update),message=record(envelope?.message),from=record(message?.from);
-    if(!Number.isSafeInteger(from?.id)||Number(from?.id)<=0)return false;
-    const student=this.store.byTelegram(Number(from!.id));
-    const input=student?this.connectionInputs.get(student.id):undefined;
-    return !!input&&input.expires>nowSeconds()&&(input.stage==='username'||input.stage==='password');
+  isTransientChatText(update:unknown):boolean{
+    const envelope=record(update),message=record(envelope?.message),from=record(message?.from),chat=record(message?.chat);
+    if(!message||!from||!chat||chat.type!=='private'||typeof message.text!=='string'||!Number.isSafeInteger(from.id)||Number(from.id)<=0||from.id!==chat.id)return false;
+    const text=message.text.trim();
+    if(!text||/^\/[a-z]+(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)||BUTTON_COMMANDS[text]||/^📘 \d+:/.test(text))return false;
+    const student=this.store.byTelegram(Number(from.id));
+    return !student||this.menus.get(student.id)?.menu!=='timezone';
   }
-  async drain():Promise<void>{await Promise.allSettled([...this.connectionTasks]);}
 
   async handle(update: unknown): Promise<void> {
     const envelope = record(update);
@@ -154,12 +149,6 @@ export class Bot {
     if(text===null && typeof webApp?.data==='string'){
       try{const action=record(JSON.parse(webApp.data))?.action;if(action==='connected')text='/start connected';else if(action==='assignment_updated')text='📝 Assignments';}catch{ /* Never trust Mini App data as account authorization. */ }
     }
-    const incomingId=typeof from?.id==='number'?Number(from.id):0;
-    const incomingStudent=incomingId>0?this.store.byTelegram(incomingId):null;
-    const input=incomingStudent?this.connectionInputs.get(incomingStudent.id):undefined;
-    const passwordMessage=rawText!==null&&!!input&&input.stage==='password'&&input.expires>nowSeconds();
-    const passwordMessageId=passwordMessage&&typeof message?.message_id==='number'&&Number.isSafeInteger(message.message_id)?Number(message.message_id):null;
-    if(passwordMessage)text=rawText;
     if (!message || !from || !chat || chat.type !== 'private' || from.is_bot === true ||
         !Number.isSafeInteger(from.id) || Number(from.id) <= 0 || from.id !== chat.id || text===null) {
       this.store.finishUpdate(updateId, nowSeconds());
@@ -176,31 +165,15 @@ export class Bot {
     // or rotate a private calendar link for the same Telegram update.
     // Read-only profile/statistics replies can be repeated without retaining their contents.
     if(!reply.sensitive)this.store.cacheReply(updateId, student.chatId, JSON.stringify({ moodleCalendarReply: 1, ...reply }), nowSeconds());
-    let progressMessageId:number|null=null;
-    if(reply.afterSend){
-      try{
-        if(this.messenger.sendWithId)progressMessageId=await this.messenger.sendWithId(student.chatId,reply.text,reply.options);
-        else await this.messenger.send(student.chatId,reply.text,reply.options);
-      }catch{console.error('Telegram connection progress could not be delivered; continuing connection processing.');}
-    }else await this.messenger.send(student.chatId, reply.text, reply.options);
+    await this.messenger.send(student.chatId, reply.text, reply.options);
     this.store.finishUpdate(updateId, nowSeconds());
-    if(passwordMessageId!==null&&this.messenger.deleteMessage){
-      void this.messenger.deleteMessage(student.chatId,passwordMessageId).catch(()=>console.error('Telegram could not delete a processed password message.'));
-    }
-    if(reply.afterSend){
-      const task=reply.afterSend(progressMessageId).catch(async()=>{
-        try{await this.messenger.send(student.chatId,'⚠️ The connection result could not be confirmed. Your password was not saved. Tap 🔗 Connect Moodle to try again.',this.menuOptions(this.store.getStudent(student.id)??student,'connection'));}catch{/* Do not retain credential input after a Telegram delivery error. */}
-      });
-      this.connectionTasks.add(task);
-      void task.finally(()=>this.connectionTasks.delete(task));
-    }
   }
 
   private menuOptions(student: Student, menu: Menu): MessageOptions {
     if(!student.moodleCipher || menu==='connection'){
-      const input=this.connectionInputs.get(student.id);
-      const placeholder=input?.stage==='password'?'Type your Moodle password':input?.stage==='username'?'Type your Moodle username':'Connect Moodle to begin';
-      return {reply_markup:{keyboard:[[{text:'🔗 Connect Moodle'}],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:placeholder}};
+      const url=this.connectionWindow(student.id);
+      const button=new URL(url).protocol==='https:'?{text:'🔗 Connect Moodle',web_app:{url}}:{text:'🔗 Connect Moodle'};
+      return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
     }
     if(menu==='more')return keyboard([['👤 Profile',...(this.isOwner(student)?['📊 Bot statistics']:[])],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
     if(menu==='statistics'&&this.isOwner(student))return keyboard([...(this.services.sharedProfiles?[['👥 Users']]:[]),['📅 Today stats','🗓 7-day stats'],['🔄 Refresh stats'],['⬅️ More','⬅️ Main menu']]);
@@ -224,101 +197,14 @@ export class Bot {
   }
   private isOwner(student:Student):boolean{return this.ownerTelegramId!==null&&student.telegramId===this.ownerTelegramId;}
   private sharingAvailable():boolean{return this.ownerTelegramId!==null&&!!this.services.sharingStatus&&!!this.services.shareProfile&&!!this.services.revokeProfile;}
-  private startConnectionPrompt(student:Student):BotReply{
-    this.connectionInputs.set(student.id,{stage:'username',username:'',expires:nowSeconds()+900});
-    this.menus.set(student.id,{menu:'connection',expiresAt:nowSeconds()+900});
-    return {
-      text:'🔗 Connect your Moodle account\n\nSend your Moodle username in this private chat. By sending it, you agree that the bot will use your username and password through Telegram and its server to sign in and read your courses, assignments, submission statuses, visible grades and deadlines.\n\nThe app does not store your password. If the connection needs diagnosis, your Telegram display name and safe step/error details may be stored encrypted for up to 90 days. Send /menu any time to stop.\n\nIndependent app by Tursunov Sunnatilla; not created by UWED.',
-      options:this.menuOptions(student,'connection'),sensitive:true,
-    };
-  }
-  private acceptConnectionInput(student:Student,input:{stage:'username'|'password';username:string;expires:number},text:string):BotReply{
-    if(input.stage==='username'){
-      const username=text.trim();
-      if(!username||username.length>256)return {text:'Please send a valid Moodle username (up to 256 characters).',options:this.menuOptions(student,'connection'),sensitive:true};
-      input.username=username;input.stage='password';input.expires=nowSeconds()+900;
-      return {text:'🔐 Now send your Moodle password as your next message. It will pass through Telegram to the bot server for sign-in only; the app does not store it. The bot will try to delete the password message as soon as it is processed. Keep this in your private chat.',options:this.menuOptions(student,'connection'),sensitive:true};
-    }
-    if(text.length>512)return {text:'That password message is too long. Send a password of up to 512 characters.',options:this.menuOptions(student,'connection'),sensitive:true};
-    const credentials={username:input.username,password:text};
-    this.connectionInputs.delete(student.id);
-    if(!this.connectionRunner){credentials.username='';credentials.password='';return {text:'⚠️ The in-chat Moodle connection service is not available right now. Try again later.',options:this.menuOptions(student,'connection'),sensitive:true};}
-    const initial='🔄 Moodle connection\n\n⏳ Connecting to the Moodle server\n▫️ Verifying credentials\n▫️ Loading the student profile\n▫️ Synchronizing assignments\n▫️ Preparing the dashboard';
-    return {
-      text:initial,options:this.menuOptions(student,'connection'),sensitive:true,
-      afterSend:async messageId=>{
-        let currentMessageId=messageId,lastText=initial;
-        const updateProgress=async(state:ConnectionState)=>{
-          const next=this.connectionProgressText(state);
-          if(next===lastText)return;
-          try{
-            if(currentMessageId!==null&&this.messenger.editMessage)await this.messenger.editMessage(student.chatId,currentMessageId,next);
-            else await this.messenger.send(student.chatId,next);
-            lastText=next;
-          }catch{currentMessageId=null;}
-        };
-        let outcome:TelegramConnectionOutcome;
-        try{outcome=await this.connectionRunner!(student.id,credentials.username,credentials.password,updateProgress);}
-        catch{outcome={status:'unknown',error:'The connection result could not be confirmed. This does not mean Moodle rejected your sign-in. Tap Status in Settings before retrying.'};}
-        finally{credentials.username='';credentials.password='';}
-        if(outcome.state)await updateProgress(outcome.state);
-        else if(outcome.error){
-          const finalText=`${outcome.status==='unknown'?'⚠️':'❌'} Moodle connection\n\n${outcome.error}${outcome.diagnosticId?`\n\nDiagnostic reference: CONN-${outcome.diagnosticId}`:''}`;
-          try{
-            if(currentMessageId!==null&&this.messenger.editMessage)await this.messenger.editMessage(student.chatId,currentMessageId,finalText);
-            else await this.messenger.send(student.chatId,finalText);
-          }catch{/* Keep the connection status itself authoritative. */}
-        }
-        if(outcome.status==='complete'||outcome.status==='partial'){
-          const connected=this.store.getStudent(student.id);
-          if(!connected?.moodleCipher){
-            try{await this.messenger.send(student.chatId,'⚠️ Moodle reported a connection, but the saved account could not be confirmed. Open Status in Settings before retrying.');}catch{/* No credential data is retained. */}
-            return;
-          }
-          try{
-            const dashboard=await this.route(connected,'/start connected');
-            await this.messenger.send(student.chatId,dashboard.text,dashboard.options);
-          }catch{
-            try{await this.messenger.send(student.chatId,'✅ Moodle connected. Your dashboard is saved; tap 📝 Assignments to open it.');}catch{/* The student can request the dashboard again. */}
-          }
-        }
-      },
-    };
-  }
-  private connectionProgressText(state:ConnectionState):string{
-    const item=(status:string,pending:string,label:string)=>`${status===pending?'⏳':status==='unavailable'||status==='failed'?'❌':status==='partial'?'⚠️':status==='reachable'||status==='verified'||status==='loaded'||status==='complete'||status==='prepared'?'✅':'▫️'} ${label}`;
-    const lines=[
-      item(state.serverStatus,'pending','Connecting to the Moodle server'),
-      item(state.authStatus,'pending','Verifying credentials'),
-      item(state.profileStatus,'pending','Loading the student profile'),
-      item(state.syncStatus,'pending','Synchronizing assignments'),
-      item(state.dashboardStatus,'pending','Preparing the dashboard'),
-    ];
-    if(state.authStatus==='unknown')lines[1]='⚠️ Credentials were not confirmed';
-    let text=`🔄 Moodle connection\n\n${lines.join('\n')}`;
-    if(state.status==='partial')text+='\n\n⚠️ Moodle connected with partial synchronization.';
-    if(state.error)text+=`\n\n${state.error}`;
-    if(state.coverageWarnings?.length)text+=`\n\nCoverage notes:\n${state.coverageWarnings.slice(0,4).map(value=>'• '+value.slice(0,180)).join('\n')}`;
-    if(state.diagnosticId)text+=`\n\nDiagnostic reference: CONN-${state.diagnosticId}`;
-    return text;
+  private connectionWindow(id:number,force=false):string{
+    const cached=this.connectionWindows.get(id);
+    if(!force&&cached&&cached.expires>nowSeconds())return cached.url;
+    const url=this.services.connectLink(id);this.connectionWindows.set(id,{url,expires:nowSeconds()+840});return url;
   }
   private async route(student: Student, text: string): Promise<BotReply> {
     const id = student.id;
     this.assignmentButtons.delete(id);
-    const activeInput=this.connectionInputs.get(id);
-    if(activeInput){
-      if(activeInput.expires<=nowSeconds()){
-        this.connectionInputs.delete(id);
-        return {text:'Your Moodle connection prompt expired. Tap 🔗 Connect Moodle to begin again.',options:this.menuOptions(student,'connection'),sensitive:true};
-      }
-      const choice=text.trim();
-      if(choice==='/menu'||choice==='/start'||choice==='⬅️ Main menu')this.connectionInputs.delete(id);
-      else if(choice==='/connect'||choice==='🔗 Connect Moodle'){
-        if(activeInput.stage==='password')return {text:'The password step is still waiting. Type your Moodle password as a separate message here; tapping Connect Moodle does not submit it.',options:this.menuOptions(student,'connection'),sensitive:true};
-        return this.startConnectionPrompt(student);
-      }
-      else return this.acceptConnectionInput(student,activeInput,text);
-    }
     const slash = /^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text);
     const courseButton = /^📘 (\d+):/.exec(text);
     let command = slash ? slash[1].toLowerCase() : BUTTON_COMMANDS[text];
@@ -336,14 +222,17 @@ export class Bot {
     let menu: Menu = state?.menu ?? 'main';
     let reply: string;
     let personalizedReturn=false;
-    if(command==='connect')return this.startConnectionPrompt(student);
-    if(command==='start'&&arg==='connected'&&student.moodleCipher){
+    const unstructuredText=!command&&!courseButton;
+    if(command==='connect'){
+      menu='connection';reply=await this.command(student,'connect','');
+    } else if(command==='start'&&arg==='connected'&&student.moodleCipher){
       command='assignments';arg='';menu='assignments';personalizedReturn=true;
       let firstName='';try{firstName=profileField((await this.services.profile?.(id))?.firstName??'');}catch{/* The saved dashboard remains available if a profile refresh is unavailable. */}
       const greeting=`✅ <b>Moodle connected${firstName?`, ${escapeHtml(firstName)}`:''}</b>\n\nYour live assignment dashboard is ready.`;
       reply=greeting+'\n\n'+await this.command(student,'assignments','');
     } else if (command === 'start' || command === 'help' || command === 'menu') {
-      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Welcome to Moodle Calendar\n\nAn independent study planner by Tursunov Sunnatilla, not created by UWED.\n\nConnect your Moodle account to see your courses, assignment deadlines, submission status, grades Moodle makes visible, and course updates. Use the existing menu to explore assignments and your weekly plan.\n\nTap 🔗 Connect Moodle below. I will ask for your username and password here in this private chat. The password goes through Telegram to the bot server for sign-in only, is not stored by the app, and the bot will try to delete the message after processing.\n\nContact: @sunnatilla_tursunov';
+      if(command==='start')this.connectionWindows.delete(id);
+      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Welcome to Moodle Calendar\n\nAn independent study planner by Tursunov Sunnatilla, not created by UWED.\n\nConnect your Moodle account to see your courses, assignment deadlines, submission status, grades Moodle makes visible, and course updates. Use the existing menu to explore assignments and your weekly plan.\n\nTap 🔗 Connect Moodle below. Sign-in opens in a private window inside Telegram.\n\nContact: @sunnatilla_tursunov';
       if(command==='start' && /^pair_[A-Za-z0-9_-]{43}$/.test(arg) && this.services.claimPairing) {
         try {
           const connected=await this.services.claimPairing(id,arg.slice(5));
@@ -402,8 +291,8 @@ export class Bot {
       else if (command === 'courses') {menu = student.moodleCipher ? 'prepare' : 'main';if(!slash)arg='menu';}
       reply = await this.command(student, command, arg);
     } else {
-      menu = 'main';
-      reply = 'Choose an emoji button below. Connect Moodle asks for your username and password in this private Telegram chat.';
+      menu = !student.moodleCipher||state?.menu==='connection'?'connection':'main';
+      reply = 'Choose an option from the menu. For your security, never send Moodle passwords or tokens in chat; sign in only inside the 🔗 Connect Moodle window.';
     }
     if (this.store.getStudent(id)) this.menus.set(id, { menu });
     else this.menus.delete(id);
@@ -420,7 +309,7 @@ export class Bot {
       if(page.offset+6<page.total)navigation.push({text:'➡️ Next page'});
       options.reply_markup.keyboard.unshift(navigation);
     }
-    return { text: reply, options, sensitive:personalizedReturn||command==='profile'||['stats','statstoday','statsweek','refreshstats','users'].includes(command??'') };
+    return { text: reply, options, sensitive:unstructuredText||personalizedReturn||command==='connect'||command==='profile'||['stats','statstoday','statsweek','refreshstats','users'].includes(command??'') };
   }
 
   private page<T>(id:number,command:string,arg:string,items:T[]):{items:T[];footer:string}{
@@ -514,13 +403,15 @@ export class Bot {
       return formatStatistics(this.store.statistics(),days,now);
     }
     if (command === 'connect') {
-      return 'Tap 🔗 Connect Moodle in the menu to begin a private-chat connection.';
+      const url=this.connectionWindow(id,true);
+      return `🔗 Connect your Moodle account\n\nTap 🔗 Connect Moodle below to open the private sign-in window inside Telegram.${new URL(url).protocol==='https:'?'':`\n${url}`}\n\nIndependent app by Tursunov Sunnatilla; not created by UWED. Do not forward a private connection link.`;
     }
     if (command === 'disconnect') {
       this.store.deleteStudent(id);
       this.services.clearConnectionDisplayName?.(id);
       this.manualSyncs.delete(id);
       this.pages.delete(id);
+      this.connectionWindows.delete(id);
       this.statisticsDays.delete(id);
       return 'Disconnected. Your Moodle connection, saved course data, timetable, completion marks, and calendar links have been deleted. Remove the old calendar subscription from your calendar app. Tap 🔗 Connect Moodle whenever you want to start again.';
     }
@@ -545,7 +436,7 @@ export class Bot {
       return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
     }
     const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
-    if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first by tapping 🔗 Connect Moodle. The bot will explain how your credentials are handled before asking for them in this private chat.';
+    if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first by tapping 🔗 Connect Moodle. Sign-in opens in a private window inside Telegram; never send your password in chat.';
 
     switch (command) {
       case 'profile': {

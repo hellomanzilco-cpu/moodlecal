@@ -18,5 +18,5 @@ test('application boots from a fresh database without live credentials and serve
   });
   assert.equal((await fetch(address+'/healthz')).status,200);
   assert.equal((await fetch(address+'/readyz')).status,503);
-  const retired=await fetch(address+'/connect');assert.equal(retired.status,410);assert.match(await retired.text(),/private Telegram bot chat/);
+  const page=await fetch(address+'/connect');assert.equal(page.status,200);const html=await page.text();assert.match(html,/id="username"/);assert.match(html,/telegram-web-app\.js/);
 });

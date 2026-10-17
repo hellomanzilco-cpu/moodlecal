@@ -11,7 +11,6 @@ import { createApp } from './api.ts';
 import {AssignmentService} from './assignments.ts';
 import {createEncryptedBackup,pruneEncryptedBackups} from './backups.ts';
 import {RuntimeHealth} from './runtime-health.ts';
-import {createTelegramConnectionRunner} from './telegram-connection.ts';
 
 async function main() {
   process.umask(0o077);
@@ -26,10 +25,9 @@ async function main() {
   const service=new SyncService(store,vault,moodle,messenger,config.publicUrl,config.pollSeconds,undefined,config.ownerTelegramId);
   const assignments=new AssignmentService(store,vault,moodle,messenger);
   const bot=new Bot(store,messenger,service,config.timezone,config.ownerTelegramId);
-  const inbox=new TelegramInbox(store,vault,update=>bot.handle(update),undefined,update=>bot.expectsTransientCredential(update));
+  const inbox=new TelegramInbox(store,vault,update=>bot.handle(update),undefined,update=>bot.isTransientChatText(update));
   const handleUpdate=async(update:unknown)=>{inbox.accept([update]);};
   const app=createApp(config,store,service,moodle,handleUpdate,assignments,runtime);
-  bot.setConnectionRunner(createTelegramConnectionRunner(app,id=>service.connectionToken(id),config.publicUrl));
   const controller=new AbortController();
   const {signal}=controller;
   let backupWork:Promise<void>|null=null;
@@ -79,6 +77,6 @@ async function main() {
   await new Promise<void>(resolve => signal.addEventListener('abort',()=>resolve(),{once:true}));
   clearInterval(inboxTimer);clearInterval(watchdog);
   const deadline=setTimeout(()=>process.exit(1),25000);deadline.unref();
-  await app.close(); await Promise.allSettled(tasks); await inbox.drain();await bot.drain();await service.drain();await assignments.drain();if(backupWork)await backupWork;store.close();clearTimeout(deadline);
+  await app.close(); await Promise.allSettled(tasks); await inbox.drain();await service.drain();await assignments.drain();if(backupWork)await backupWork;store.close();clearTimeout(deadline);
 }
 main().catch(() => { console.error('Moodle Calendar failed to start. Check environment configuration, database access, and Telegram webhook mode.');process.exit(1); });

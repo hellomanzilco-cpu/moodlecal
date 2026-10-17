@@ -14,7 +14,7 @@ function normalized(value:unknown):{id:number;chatId:number;payload:unknown}|nul
     try{const action=object(JSON.parse(webApp.data))?.action;if(action==='connected'||action==='assignment_updated')data=JSON.stringify({action});}catch{/* Ignore unsupported Mini App data. */}
   }
   if(text===null&&data===null)return {id,chatId:0,payload:null};
-  return {id,chatId:from.id,payload:{update_id:id,message:{chat:{id:from.id,type:'private'},from:{id:from.id,is_bot:false},...(typeof message.message_id==='number'?{message_id:message.message_id}:{}),...(text===null?{web_app_data:{data}}:{text})}}};
+  return {id,chatId:from.id,payload:{update_id:id,message:{chat:{id:from.id,type:'private'},from:{id:from.id,is_bot:false},...(text===null?{web_app_data:{data}}:{text})}}};
 }
 function lane(payload:unknown):'menu'|'network'{
   const text=String(object(object(payload)?.message)?.text||'').trim();
@@ -26,19 +26,18 @@ function lane(payload:unknown):'menu'|'network'{
 export class TelegramInbox{
   private store:Store;private vault:Vault;private handle:(update:unknown)=>Promise<void>;private now:()=>number;
   private running=new Map<number,{chatId:number;lane:string;work:Promise<void>}>();private stopped=false;
-  private isCredentialInput:(update:unknown)=>boolean;
-  private credentialQueues=new Map<number,NonNullable<ReturnType<typeof normalized>>[]>();
-  private credentialRunning=new Set<number>();
-  private credentialIds=new Set<number>();
-  constructor(store:Store,vault:Vault,handle:(update:unknown)=>Promise<void>,now=()=>Math.floor(Date.now()/1000),isCredentialInput:(update:unknown)=>boolean=()=>false){
-    this.store=store;this.vault=vault;this.handle=handle;this.now=now;this.isCredentialInput=isCredentialInput;
+  private isTransientText:(update:unknown)=>boolean;
+  private transientQueues=new Map<number,NonNullable<ReturnType<typeof normalized>>[]>();
+  private transientIds=new Set<number>();
+  constructor(store:Store,vault:Vault,handle:(update:unknown)=>Promise<void>,now=()=>Math.floor(Date.now()/1000),isTransientText:(update:unknown)=>boolean=()=>false){
+    this.store=store;this.vault=vault;this.handle=handle;this.now=now;this.isTransientText=isTransientText;
   }
   accept(updates:unknown[],advanceOffset=false):void{
     const unique=new Map<number,NonNullable<ReturnType<typeof normalized>>>();
     for(const update of updates){const value=normalized(update);if(value&&!unique.has(value.id))unique.set(value.id,value);}
     const values=[...unique.values()];
-    const credentialValues=values.filter(value=>value.chatId&&this.isCredentialInput(value.payload));
-    const durableValues=values.filter(value=>!credentialValues.includes(value));
+    const transientValues=values.filter(value=>value.chatId&&this.isTransientText(value.payload));
+    const durableValues=values.filter(value=>!transientValues.includes(value));
     this.store.transaction(()=>{
       const pending=Number(this.store.db.prepare('SELECT COUNT(*) AS count FROM telegram_inbox').get()?.count||0);
       const fresh=durableValues.filter(value=>value.chatId&&!this.store.hasUpdate(value.id)&&!this.store.db.prepare('SELECT 1 FROM telegram_inbox WHERE id=?').get(value.id));
@@ -46,7 +45,7 @@ export class TelegramInbox{
       let offset=Number(this.store.getMeta('telegramOffset')||0);
       for(const value of values){
         offset=Math.max(offset,value.id+1);
-        if(this.store.hasUpdate(value.id)||credentialValues.includes(value)||this.store.db.prepare('SELECT 1 FROM telegram_inbox WHERE id=?').get(value.id))continue;
+        if(this.store.hasUpdate(value.id)||transientValues.includes(value)||this.store.db.prepare('SELECT 1 FROM telegram_inbox WHERE id=?').get(value.id))continue;
         if(!value.chatId){this.store.finishUpdate(value.id,this.now());continue;}
         const count=Number(this.store.db.prepare('SELECT COUNT(*) AS count FROM telegram_inbox WHERE chatId=?').get(value.chatId)?.count||0);
         if(count>=20){this.store.finishUpdate(value.id,this.now());this.store.metric('telegram_overload',this.now());continue;}
@@ -54,7 +53,7 @@ export class TelegramInbox{
       }
       if(advanceOffset)this.store.setMeta('telegramOffset',String(offset));
     });
-    for(const value of credentialValues)this.queueCredential(value);
+    for(const value of transientValues)this.queueTransient(value);
     this.pump();
   }
   pump():void{
@@ -64,33 +63,32 @@ export class TelegramInbox{
     for(const row of rows){
       if(this.running.size>=6)break;
       const id=Number(row.id),chatId=Number(row.chatId);if(busy.has(chatId))continue;busy.add(chatId);
-      const barrier=this.credentialQueues.get(chatId)?.[0];if(barrier&&id>barrier.id)continue;
       if(row.lane==='network'&&[...this.running.values()].filter(value=>value.lane==='network').length>=2)continue;
       let healthy=true;
       const work=this.process(row).catch(()=>{healthy=false;/* SQLite failures wait for the next bounded worker tick. */}).finally(()=>{this.running.delete(id);if(healthy&&!this.stopped)this.pump();});
       this.running.set(id,{chatId,lane:String(row.lane),work});
     }
-    this.dispatchCredentials();
+    this.dispatchTransient();
   }
-  private queueCredential(value:NonNullable<ReturnType<typeof normalized>>):void{
-    if(this.store.hasUpdate(value.id)||this.credentialIds.has(value.id))return;
-    const queue=this.credentialQueues.get(value.chatId)||[];
-    queue.push(value);queue.sort((a,b)=>a.id-b.id);this.credentialQueues.set(value.chatId,queue);this.credentialIds.add(value.id);
+  private queueTransient(value:NonNullable<ReturnType<typeof normalized>>):void{
+    if(this.store.hasUpdate(value.id)||this.transientIds.has(value.id))return;
+    const queue=this.transientQueues.get(value.chatId)||[];
+    queue.push(value);queue.sort((a,b)=>a.id-b.id);this.transientQueues.set(value.chatId,queue);this.transientIds.add(value.id);
   }
-  private dispatchCredentials():void{
-    if(this.stopped)return;
-    for(const [chatId,queue]of this.credentialQueues){
-      if(this.credentialRunning.has(chatId)||!queue.length||[...this.running.values()].some(value=>value.chatId===chatId))continue;
+  private dispatchTransient():void{
+    if(this.stopped||this.running.size>=6)return;
+    for(const [chatId,queue]of this.transientQueues){
+      if(this.running.size>=6)break;
+      if(!queue.length||[...this.running.values()].some(value=>value.chatId===chatId))continue;
       const value=queue[0];
       if(this.store.db.prepare('SELECT 1 FROM telegram_inbox WHERE chatId=? AND id<? LIMIT 1').get(chatId,value.id))continue;
-      this.credentialRunning.add(chatId);
-      const work=(async()=>{try{if(!this.store.hasUpdate(value.id))await this.handle(value.payload);}catch{console.error('Transient Telegram credential update failed; credentials were discarded without persistence.');}finally{
-        this.store.finishUpdate(value.id,this.now());this.credentialIds.delete(value.id);
-        const remaining=(this.credentialQueues.get(chatId)||[]).filter(item=>item.id!==value.id);
-        if(remaining.length)this.credentialQueues.set(chatId,remaining);else this.credentialQueues.delete(chatId);
-        this.credentialRunning.delete(chatId);if(!this.stopped)this.pump();
+      const work=(async()=>{try{if(!this.store.hasUpdate(value.id))await this.handle(value.payload);}catch{console.error('Transient Telegram text could not be delivered; it was discarded without persistence.');}finally{
+        this.store.finishUpdate(value.id,this.now());this.transientIds.delete(value.id);
+        const remaining=(this.transientQueues.get(chatId)||[]).filter(item=>item.id!==value.id);
+        if(remaining.length)this.transientQueues.set(chatId,remaining);else this.transientQueues.delete(chatId);
+        if(!this.stopped)this.pump();
       }})();
-      this.running.set(value.id,{chatId,lane:'credential',work});
+      this.running.set(value.id,{chatId,lane:'transient',work});
     }
   }
   private async process(row:Record<string,unknown>):Promise<void>{

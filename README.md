@@ -69,9 +69,9 @@ npm test
 npm start
 ```
 
-Open a **private chat** with your bot, press Start, and tap **🔗 Connect Moodle**. New students see only this button. No browser, Web App or external form opens. The bot asks for the Moodle username and then the password directly in the private chat. The password passes through Telegram to the bot server for sign-in only; the app does not store it and attempts to delete the Telegram message after processing. The server exchanges the credentials with Moodle and stores the resulting token encrypted.
+Open a **private chat** with your bot, press Start, and tap **🔗 Connect Moodle**. New students see only this button. It opens the existing sign-in form as a Telegram Web App inside Telegram; students enter their Moodle username and password there, with explicit consent. The password is sent to the bot server for sign-in only and is not stored. The server exchanges the credentials with Moodle and stores the resulting token encrypted.
 
-The bot edits one Telegram message through the real stages: Moodle availability, sign-in, profile loading, course and assignment synchronization, and dashboard preparation. It reports a partial result separately from failure and sends the live dashboard after a successful or limited-coverage connection. Password messages are excluded from the durable inbox and are never sent to the operator. Failed or limited-coverage attempts retain an encrypted Telegram display name and safe stage/error details for up to 90 days. If `OWNER_TELEGRAM_ID` is configured, operational failures and limited coverage also generate a sanitized private alert. HTTP access logs contain only method, route template, status and duration.
+The Web App shows live progress for Moodle availability, sign-in, profile loading, course and assignment synchronization, and dashboard preparation. It reports a partial result separately from failure and returns the student to the live dashboard after a successful or limited-coverage connection. Passwords are never sent in chat or to the operator. Failed or limited-coverage attempts retain an encrypted Telegram display name and safe stage/error details for up to 90 days. If `OWNER_TELEGRAM_ID` is configured, operational failures and limited coverage also generate a sanitized private alert. HTTP access logs contain only method, route template, status and duration.
 
 `localhost` links work only on the computer running the app. To connect from a phone, receive Moodle events, or let a calendar provider fetch feeds, use a public HTTPS address and set `PUBLIC_URL` accordingly. This is required even with Telegram long polling, which only retrieves incoming Telegram messages and never checks Moodle. Plain HTTP is accepted only for local development.
 
@@ -95,7 +95,7 @@ Press Start to open the persistent keyboard. Connected students see six buttons:
 | 📰 Recent updates | Read your saved website change history. |
 | 🗓 Calendar | Your private calendar subscription URL. |
 | ⚙️ Settings | Alerts, time zone, connection status, reconnect, help, and disconnect. |
-| 🔗 Connect Moodle | Starts username and password steps in the private bot chat. |
+| 🔗 Connect Moodle | Opens the private Moodle sign-in form inside Telegram. |
 
 Under **📝 Assignments**, choose **⏳ Next deadlines**, **🕓 Later / undated**, **📨 Awaiting grades**, or **✅ Graded**. The nearest future deadline in each course determines its current assignment group; tied deadlines stay together, and early submission does not advance the next group before that deadline passes. Accessible unfinished overdue work remains visible. This is a planning rule, not proof that a teacher released an assignment. Drafts remain outstanding; a zero grade counts as graded. Missing access information is reported without guessing. Personal done marks do not submit work or modify grades.
 
@@ -108,7 +108,7 @@ Slash commands remain available for compatibility and advanced controls:
 | Command | Action |
 | --- | --- |
 | `/start`, `/help` | Show help and connection instructions. |
-| `/connect` | Start the in-chat Moodle username and password flow. |
+| `/connect` | Show a fresh Connect Moodle Web App button. |
 | `/courses` | List your enrolled courses and their IDs. |
 | `/mute COURSE_ID`, `/unmute COURSE_ID` | Manage a course's inclusion in your assistant. |
 | `/today`, `/week` | Show upcoming classes and dated work. |
