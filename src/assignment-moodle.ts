@@ -21,7 +21,7 @@ export function trustedFile(baseUrl:string,raw:unknown):AssignmentFile|null{
 function fileList(base:string,...values:unknown[]):AssignmentFile[]{const files=new Map<string,AssignmentFile>();for(const value of values){if(value===undefined)continue;for(const raw of arr(value)){const file=trustedFile(base,raw);if(file)files.set(file.url,file);}}return [...files.values()].sort((a,b)=>a.name.localeCompare(b.name));}
 export async function readAssignment(reader:Reader,token:string,assignmentId:number,courseId:number,now:number,access:(assignment:R,module:R|undefined,last:R|undefined,now:number)=>Pick<Item,'availability'|'availabilityReason'|'availableFrom'|'cutoffAt'|'canEdit'|'canSubmit'>):Promise<AssignmentDetail>{
  const identity=await reader.identify(token),functions=new Set(identity.functions);
- if(!functions.has('mod_assign_get_assignments')||!functions.has('mod_assign_get_submission_status'))throw new MoodleError('Moodle has not enabled assignment details for this connection.',false,'permission');
+ if(!functions.has('mod_assign_get_assignments'))throw new MoodleError('Moodle has not enabled assignment details for this connection.',false,'permission');
  const courses=arr(await reader.call(token,'core_enrol_get_users_courses',{userid:identity.userId,returnusercount:false})).map(obj);
  const course=courses.find(c=>num(c.id)===courseId);if(!course)throw new MoodleError('This course is no longer available to your account.',false,'permission');
  const sections=arr(await reader.call(token,'core_course_get_contents',{courseid:courseId})).map(obj);
@@ -30,7 +30,17 @@ export async function readAssignment(reader:Reader,token:string,assignmentId:num
  const assignments=arr(result.courses).map(obj).filter(c=>num(c.id)===courseId).flatMap(c=>arr(c.assignments).map(obj));
  const assignment=assignments.find(a=>num(a.id)===assignmentId),module=assignment?modules.find(m=>num(m.id)===num(assignment.cmid)&&m.modname==='assign'):undefined;
  if(!assignment||!module||module.sectionRestricted||(module.uservisible!==undefined&&!yes(module.uservisible)))throw new MoodleError('Moodle has not released this assignment to your account.',false,'permission');
- const status=obj(await reader.call(token,'mod_assign_get_submission_status',{assignid:assignmentId,userid:identity.userId}));
+ let status:R={};
+ if(functions.has('mod_assign_get_submission_status')){
+  try{
+   const current=obj(await reader.call(token,'mod_assign_get_submission_status',{assignid:assignmentId,userid:identity.userId}));
+   if(current.lastattempt===undefined&&!yes(assignment.nosubmissions))throw new MoodleError('Moodle did not confirm this assignment submission status.',false,'permission');
+   // Keep only values Moodle actually returned. Missing edit/submit permissions
+   // remain false in the detail view, so an incomplete response cannot enable uploads.
+   status=current;
+  }
+  catch(error){if(!(error instanceof MoodleError)||error.reason==='authentication')throw error;}
+ }
  const last=status.lastattempt===undefined?{}:obj(status.lastattempt),submissionSource=yes(assignment.teamsubmission)?last.teamsubmission:last.submission,submission=submissionSource===undefined?{}:obj(submissionSource);
  const plugins=submission.plugins===undefined?[]:arr(submission.plugins).map(obj);
  const submittedFiles=fileList(reader.baseUrl,...plugins.filter(p=>p.type==='file').flatMap(p=>p.fileareas===undefined?[]:arr(p.fileareas).map(area=>obj(area).files)));

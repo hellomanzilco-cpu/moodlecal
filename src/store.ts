@@ -4,10 +4,14 @@ import { dirname } from 'node:path';
 import type { ClassEntry, Course, Item, OutboxEntry, Snapshot, Student } from './types.ts';
 import type { MoodleChangeEvent } from './moodle-events.ts';
 import type { WebsiteChange } from './changes.ts';
-import {DAILY_SYNCS,syncDay,syncResetAt} from './sync-quota.ts';
 import {hashSecret} from './security.ts';
 
 type Row = Record<string, unknown>;
+export interface ConnectionAttemptRow {
+  id:number;studentId:number;displayNameCipher:string|null;startedAt:number;finishedAt:number|null;
+  stage:string;status:'working'|'failed'|'blocked'|'partial';failureCategory:string|null;operation:string|null;
+  apiErrorCode:string|null;message:string|null;
+}
 const statisticsDay=(seconds:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(seconds*1000));
 function student(row: Row | undefined): Student | null {
   if (!row) return null;
@@ -65,13 +69,26 @@ export class Store {
       CREATE TABLE IF NOT EXISTS submission_operations(id TEXT PRIMARY KEY,studentId INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,assignmentKey TEXT NOT NULL,connectionHash TEXT NOT NULL,state TEXT NOT NULL,stage TEXT NOT NULL,message TEXT NOT NULL,proof TEXT NOT NULL,createdAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS submission_owner ON submission_operations(studentId,assignmentKey,createdAt);
       CREATE TABLE IF NOT EXISTS usage_daily(day TEXT NOT NULL,event TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(day,event));
+      CREATE TABLE IF NOT EXISTS connection_attempts(
+        id INTEGER PRIMARY KEY,studentId INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        displayNameCipher TEXT,startedAt INTEGER NOT NULL,finishedAt INTEGER,stage TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'working',failureCategory TEXT,operation TEXT,apiErrorCode TEXT,message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS connection_attempts_started ON connection_attempts(startedAt DESC);
+      CREATE TABLE IF NOT EXISTS connection_link_names(
+        studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+        nameCipher TEXT NOT NULL,expires INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS profile_shares(studentId INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,ownerTelegramId INTEGER NOT NULL,connectionHash TEXT NOT NULL,profileCipher TEXT NOT NULL,sharedAt INTEGER NOT NULL,consentVersion TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS telegram_inbox(id INTEGER PRIMARY KEY,chatId INTEGER NOT NULL,cipher TEXT NOT NULL,createdAt INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,nextAttempt INTEGER NOT NULL DEFAULT 0,lane TEXT NOT NULL DEFAULT 'menu');
       CREATE INDEX IF NOT EXISTS telegram_inbox_chat ON telegram_inbox(chatId,id);
-      CREATE TABLE IF NOT EXISTS sync_budgets(subjectHash TEXT NOT NULL,day TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(subjectHash,day));
       PRAGMA user_version=1;`);
+    // Remove the obsolete daily-sync accounting table from existing databases.
+    this.db.exec('DROP TABLE IF EXISTS sync_budgets');
     if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
     if(!this.db.prepare('PRAGMA table_info(telegram_inbox)').all().some(row=>row.name==='lane'))this.db.exec("ALTER TABLE telegram_inbox ADD COLUMN lane TEXT NOT NULL DEFAULT 'menu'");
+    this.pruneConnectionAttempts();
+    this.db.prepare('DELETE FROM connection_link_names WHERE expires<=?').run(Math.floor(Date.now()/1000));
   }
   close() { this.db.close(); }
   metric(event:string,now=Math.floor(Date.now()/1000)) {
@@ -80,17 +97,53 @@ export class Store {
     this.db.prepare('INSERT INTO usage_daily(day,event,count) VALUES(?,?,1) ON CONFLICT(day,event) DO UPDATE SET count=count+1').run(day,event);
     this.db.prepare('DELETE FROM usage_daily WHERE day<?').run(statisticsDay(now-90*86400));
   }
+  startConnectionAttempt(studentId:number,displayNameCipher:string|null,now=Math.floor(Date.now()/1000)):number {
+    this.pruneConnectionAttempts(now);
+    const result=this.db.prepare("INSERT INTO connection_attempts(studentId,displayNameCipher,startedAt,stage,status) VALUES(?,?,?,'connection_setup','working')")
+      .run(studentId,displayNameCipher,now);
+    return Number(result.lastInsertRowid);
+  }
+  setConnectionLinkName(studentId:number,nameCipher:string,expires:number):void {
+    this.db.prepare('INSERT INTO connection_link_names(studentId,nameCipher,expires) VALUES(?,?,?) ON CONFLICT(studentId) DO UPDATE SET nameCipher=excluded.nameCipher,expires=excluded.expires').run(studentId,nameCipher,expires);
+  }
+  connectionLinkName(studentId:number,now=Math.floor(Date.now()/1000)):string|null {
+    this.db.prepare('DELETE FROM connection_link_names WHERE studentId=? AND expires<=?').run(studentId,now);
+    const row=this.db.prepare('SELECT nameCipher FROM connection_link_names WHERE studentId=? AND expires>?').get(studentId,now);
+    return row?String(row.nameCipher):null;
+  }
+  clearConnectionLinkName(studentId:number):void {
+    this.db.prepare('DELETE FROM connection_link_names WHERE studentId=?').run(studentId);
+  }
+  pruneConnectionLinkNames(now=Math.floor(Date.now()/1000)):void {
+    this.db.prepare('DELETE FROM connection_link_names WHERE expires<=?').run(now);
+  }
+  setConnectionAttemptStage(id:number,stage:string):void {
+    this.db.prepare("UPDATE connection_attempts SET stage=? WHERE id=? AND status='working'").run(stage,id);
+  }
+  failConnectionAttempt(id:number,record:{stage:string;status?:'failed'|'blocked'|'partial';failureCategory:string;operation?:string|null;apiErrorCode?:string|null;message:string},now=Math.floor(Date.now()/1000)):void {
+    const token=(value:string|null|undefined)=>value&&/^[a-zA-Z0-9_-]{1,80}$/.test(value)?value:null;
+    const message=record.message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g,' ').slice(0,700);
+    this.db.prepare("UPDATE connection_attempts SET finishedAt=?,stage=?,status=?,failureCategory=?,operation=?,apiErrorCode=?,message=? WHERE id=? AND status='working'")
+      .run(now,record.stage,record.status??'failed',token(record.failureCategory)??'unknown',token(record.operation),token(record.apiErrorCode),message,id);
+  }
+  completeConnectionAttempt(id:number):void {
+    // Successful connects do not retain a named diagnostic record.
+    this.db.prepare("DELETE FROM connection_attempts WHERE id=? AND status='working'").run(id);
+  }
+  connectionAttempts(since:number):ConnectionAttemptRow[] {
+    return this.db.prepare('SELECT id,studentId,displayNameCipher,startedAt,finishedAt,stage,status,failureCategory,operation,apiErrorCode,message FROM connection_attempts WHERE startedAt>=? ORDER BY startedAt DESC,id DESC LIMIT 500').all(since) as unknown as ConnectionAttemptRow[];
+  }
+  connectionAttempt(id:number):ConnectionAttemptRow|null {
+    const row=this.db.prepare('SELECT id,studentId,displayNameCipher,startedAt,finishedAt,stage,status,failureCategory,operation,apiErrorCode,message FROM connection_attempts WHERE id=?').get(id);
+    return row?(row as unknown as ConnectionAttemptRow):null;
+  }
+  pruneConnectionAttempts(now=Math.floor(Date.now()/1000)):void {
+    this.db.prepare('DELETE FROM connection_attempts WHERE startedAt<?').run(now-90*86400);
+  }
+  markInterruptedConnectionAttempts(now=Math.floor(Date.now()/1000)):void {
+    this.db.prepare("UPDATE connection_attempts SET finishedAt=?,status='failed',failureCategory='interrupted',message='Service restarted before the connection result was recorded.' WHERE status='working'").run(now);
+  }
   statistics(){return {students:this.db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN moodleCipher IS NOT NULL THEN 1 ELSE 0 END),0) AS connected,COALESCE(SUM(CASE WHEN paused=1 THEN 1 ELSE 0 END),0) AS paused FROM students').get(),daily:this.db.prepare('SELECT day,event,count FROM usage_daily ORDER BY day DESC,event').all(),dayTimeZone:'Asia/Tashkent',retentionDays:90,containsPersonalIdentifiers:false};}
-  syncAllowance(telegramId:number,now=Math.floor(Date.now()/1000)){
-    const used=Number(this.db.prepare('SELECT count FROM sync_budgets WHERE subjectHash=? AND day=?').get(hashSecret('sync-budget:'+telegramId),syncDay(now))?.count||0);
-    return {used,remaining:Math.max(0,DAILY_SYNCS-used),limit:DAILY_SYNCS,resetAt:syncResetAt(now)};
-  }
-  consumeSync(telegramId:number,now=Math.floor(Date.now()/1000)):boolean{
-    return this.transaction(()=>{
-      this.db.prepare('DELETE FROM sync_budgets WHERE day<?').run(syncDay(now-2*86400));
-      return !!this.db.prepare('INSERT INTO sync_budgets(subjectHash,day,count) VALUES(?,?,1) ON CONFLICT(subjectHash,day) DO UPDATE SET count=count+1 WHERE count<?').run(hashSecret('sync-budget:'+telegramId),syncDay(now),DAILY_SYNCS).changes;
-    });
-  }
   transaction<T>(work: () => T): T {
     if (this.db.isTransaction) return work();
     this.db.exec('BEGIN IMMEDIATE');

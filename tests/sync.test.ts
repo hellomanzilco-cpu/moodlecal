@@ -40,26 +40,31 @@ test('connect encrypts credentials, consumes link, and silently baselines existi
   const notices=f.store.pending(f.now);assert.equal(notices.length,1);assert.match(notices[0].text,/Moodle connected/);
   await assert.rejects(f.service.connect(raw,'other-token'),/expired/);
 });
-test('connection is not saved when Moodle omits submission status data',async t=>{
+test('connection saves assignments with unverified status when Moodle omits submission status data',async t=>{
   const f=fixture();t.after(()=>f.store.close());
-  f.snapshot={...f.snapshot,warnings:['Moodle did not return assignment submission statuses or grades. Published deadlines may be incomplete.']};
-  await assert.rejects(f.connect(),/did not verify assignment submission and grade status/);
-  assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);assert.equal(f.store.rawItems(f.s.id).length,0);
+  f.snapshot={...f.snapshot,items:[{...item(),submissionStatus:'unknown'}],warnings:['Moodle did not return assignment submission statuses or grades.']};
+  const link=new URL(f.service.connectLink(f.s.id));
+  const token=new URLSearchParams(link.hash.slice(1)).get('token')!;
+  const warnings=await f.service.connect(token,'access-token');
+  assert.ok(warnings.some(warning=>warning.includes('submission statuses')));
+  assert.ok(f.store.getStudent(f.s.id)!.moodleCipher);assert.equal(f.store.rawItems(f.s.id).length,1);
+  assert.equal(f.store.rawItems(f.s.id)[0].submissionStatus,'unknown');
 });
-test('sync preserves the complete last-good snapshot when submission status is missing',async t=>{
+test('sync saves current assignments when status is missing and marks them unverified',async t=>{
   const f=fixture();t.after(()=>f.store.close());
   const quiz:Item={key:'quiz:22',courseId:10,courseName:'Economics',kind:'quiz',title:'Exam',description:'',url:'https://moodle.uwed.uz/mod/quiz/view.php?id=22',modifiedAt:1,dueAt:2_000_000_200,startsAt:null,endsAt:null,completed:false,files:[]};
   const event:Item={key:'event:23',courseId:10,courseName:'Economics',kind:'event',title:'Seminar',description:'',url:'https://moodle.uwed.uz/calendar/view.php?id=23',modifiedAt:1,dueAt:null,startsAt:2_000_000_300,endsAt:null,completed:false,files:[]};
   const submitted={...item('Essay',true),submissionStatus:'submitted_graded' as const,grade:'90 / 100'};
   f.snapshot={...f.snapshot,items:[submitted,quiz,event]};await f.connect();await f.service.deliver();
   const lastSuccess=f.store.getStudent(f.s.id)!.lastSyncAt;
-  f.snapshot={...f.snapshot,items:[{...item('Essay',false),dueAt:2_000_000_100,submissionStatus:'unknown',grade:null}],warnings:['Moodle did not return assignment submission statuses or grades. Published deadlines may be incomplete.']};
-  await assert.rejects(f.service.refresh(f.s.id),/did not verify assignment submission and grade status/);const saved=f.store.rawItems(f.s.id);
+  f.now+=300;
+  f.snapshot={...f.snapshot,items:[{...item('Essay',false),dueAt:2_000_000_100,submissionStatus:'unknown',grade:null},quiz,event],warnings:['Moodle did not return assignment submission statuses or grades.']};
+  const response=await f.service.refresh(f.s.id);assert.match(response,/Sync finished with limits/);const saved=f.store.rawItems(f.s.id);
   const assignment=saved.find(value=>value.key==='assignment:1')!;
-  assert.equal(assignment.submissionStatus,'submitted_graded');assert.equal(assignment.completed,true);assert.equal(assignment.grade,'90 / 100');assert.equal(assignment.dueAt,2_000_000_000);
-  assert.equal(f.store.getStudent(f.s.id)!.lastSyncAt,lastSuccess);
+  assert.equal(assignment.submissionStatus,'unknown');assert.equal(assignment.completed,false);assert.equal(assignment.grade,null);assert.equal(assignment.dueAt,2_000_000_100);
+  const lastSyncAt=f.store.getStudent(f.s.id)!.lastSyncAt;
+  assert.ok(lastSuccess!==null&&lastSyncAt!==null&&lastSyncAt>lastSuccess);
   assert.ok(saved.some(value=>value.key==='quiz:22'));assert.ok(saved.some(value=>value.key==='event:23'));
-  f.service.reminders();assert.equal(f.store.pending(f.now).filter(entry=>entry.text.startsWith('Deadline reminder:')).length,0);
 });
 test('snapshot changes are durable and unchanged polls do not duplicate notifications; reverted edits notify',async t => {
   const f=fixture();t.after(()=>f.store.close());await f.connect();await f.service.deliver();

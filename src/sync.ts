@@ -6,14 +6,16 @@ import type { Item, Messenger, MoodleGateway, MoodleProfile, ConnectionProgress 
 import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
-import { ASSIGNMENT_STATUS_WARNING, MoodleError } from './moodle.ts';
+import { MoodleError } from './moodle.ts';
 import { assignmentLink } from './assignment-session.ts';
 import {ProfileSharingService} from './profile-sharing.ts';
-import {SyncLimitError} from './sync-quota.ts';
+import {telegramDisplayName,telegramDisplayNameContext} from './connection-diagnostics.ts';
 import {mapConcurrent} from './limits.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
+  private connectionNames=new Map<number,{value:string;expires:number}>();
+  private connectionAlertTimes=new Map<string,number>();
   private locks = new Map<number, Promise<void>>();
   private eventWork:Promise<void>|null=null;
   private deliveryWork:Promise<void>|null=null;
@@ -25,11 +27,12 @@ export class SyncService {
   private publicUrl: string;
   private pollSeconds: number;
   private now: () => number;
+  private ownerTelegramId:number|null;
   private sharing:ProfileSharingService;
   constructor(store: Store, vault: Vault, moodle: MoodleGateway,
     messenger: Messenger, publicUrl: string, pollSeconds: number,
     now: () => number = () => Math.floor(Date.now()/1000),ownerTelegramId:number|null=null) {
-    this.store=store; this.vault=vault; this.moodle=moodle; this.messenger=messenger;
+    this.store=store; this.vault=vault; this.moodle=moodle; this.messenger=messenger;this.ownerTelegramId=ownerTelegramId;
     this.publicUrl=publicUrl; this.pollSeconds=pollSeconds; this.now=now;
     this.sharing=new ProfileSharingService(store,vault,id=>this.profile(id),ownerTelegramId,now);
   }
@@ -40,18 +43,57 @@ export class SyncService {
     try { return await work(); }
     finally { release(); if (this.locks.get(id)===next) this.locks.delete(id); }
   }
-  connectLink(id: number): string {
+  connectionToken(id:number):string {
     const raw = newSecret();
-    this.store.patchStudent(id, {linkHash:hashSecret(raw),linkExpires:this.now()+900});
-    return `${this.publicUrl}/connect#token=${raw}`;
+    const expires=this.now()+900;
+    const cached=this.connectionNames.get(id);
+    if(cached&&cached.expires>this.now())this.store.setConnectionLinkName(id,this.vault.seal(cached.value,telegramDisplayNameContext(id)),expires);
+    else this.store.clearConnectionLinkName(id);
+    this.store.patchStudent(id, {linkHash:hashSecret(raw),linkExpires:expires});
+    return raw;
   }
+  connectLink(id:number):string{return `${this.publicUrl}/connect#token=${this.connectionToken(id)}`;}
   assignmentLink(id:number,key:string):string{return assignmentLink(this.store,this.publicUrl,id,key,this.now());}
+  rememberTelegramDisplayName(id:number,firstName:string,lastName:string):void {
+    const name=telegramDisplayName(firstName,lastName);
+    const now=this.now();
+    for(const [studentId,value] of this.connectionNames)if(value.expires<=now)this.connectionNames.delete(studentId);
+    if(name)this.connectionNames.set(id,{value:name,expires:now+15*60});
+  }
+  startConnectionAttempt(id:number,now=this.now()):number {
+    const cached=this.connectionNames.get(id);
+    if(cached&&cached.expires<=now)this.connectionNames.delete(id);
+    const name=this.store.connectionLinkName(id,now)||(cached&&cached.expires>now?this.vault.seal(cached.value,telegramDisplayNameContext(id)):null);
+    return this.store.startConnectionAttempt(id,name,now);
+  }
+  clearConnectionDisplayName(id:number):void {
+    this.connectionNames.delete(id);
+  }
+  async notifyConnectionIssue(studentId:number,diagnosticId:number,details:{stage:string;failureCategory:string;operation?:string|null;apiErrorCode?:string|null;httpStatus?:number;coverageWarningCount?:number;userMessage?:string;syncCoverage?:string}):Promise<void>{
+    if(this.ownerTelegramId===null)return;
+    const row=this.store.connectionAttempt(diagnosticId);
+    if(!row||row.studentId!==studentId)return;
+    const now=this.now();for(const [key,time] of this.connectionAlertTimes)if(time<=now-600)this.connectionAlertTimes.delete(key);
+    if(this.connectionAlertTimes.size>5000)for(const key of this.connectionAlertTimes.keys()){this.connectionAlertTimes.delete(key);if(this.connectionAlertTimes.size<=4000)break;}
+    const alertKey=[studentId,details.stage,details.failureCategory,details.operation??'',details.apiErrorCode??''].join(':');
+    if((this.connectionAlertTimes.get(alertKey)??0)>now-600)return;
+    this.connectionAlertTimes.set(alertKey,now);
+    let displayName='Name unavailable';
+    if(row.displayNameCipher){try{displayName=telegramDisplayName(this.vault.open(row.displayNameCipher,telegramDisplayNameContext(studentId)),'')||displayName;}catch{}}
+    const stages:Record<string,string>={connecting:'Moodle site availability',authenticating:'Moodle sign-in',profile:'Moodle profile and access',synchronizing:'Course and assignment synchronization',dashboard:'Saving the dashboard'};
+    const code=(value:string|undefined|null)=>value&&/^[a-zA-Z0-9_-]{1,80}$/.test(value)?value:'not available';
+    const operation=code(details.operation);
+    const httpStatus=Number.isInteger(details.httpStatus)&&details.httpStatus!>=100&&details.httpStatus!<600?String(details.httpStatus):'not available';
+    const detail=details.coverageWarningCount!==undefined?`Limited coverage: ${details.coverageWarningCount} warning${details.coverageWarningCount===1?'':'s'}.`:`Reason: ${code(details.failureCategory)}.`;
+    const next=details.failureCategory==='network'?'Check whether Moodle is available and retry the same connection flow.':details.failureCategory==='permission'?'Ask university IT to review the required Moodle mobile web service permissions.':details.failureCategory==='partial_coverage'?'Review the optional Moodle APIs named in the internal coverage report and confirm their expected availability.':details.failureCategory==='authentication'?'Check whether the Moodle session or enabled mobile services changed after sign-in.':'Inspect this operation and safe error code around the diagnostic time; never request the student password.';
+    const at=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tashkent',dateStyle:'medium',timeStyle:'short'}).format(new Date(now*1000));
+    const message=`⚠️ Moodle connection needs attention\n\nTelegram name: ${displayName}\nTelegram ID: ${this.store.getStudent(studentId)?.telegramId??'unavailable'}\nStep: ${stages[details.stage]??'Connection setup'}\n${detail}\nUser-facing message: ${details.userMessage??'Connection completed with limited Moodle coverage.'}\nSync coverage: ${details.syncCoverage??(details.coverageWarningCount!==undefined?'partial':'unknown')}\nMoodle operation: ${operation}\nMoodle error code: ${code(details.apiErrorCode)}\nHTTP status: ${httpStatus}\nTime: ${at} Asia/Tashkent\nDiagnostic ID: CONN-${diagnosticId}\nSuggested next step: ${next}\n\nNo password, Moodle username, token, or raw Moodle response is included.`;
+    try{await this.messenger.send(this.ownerTelegramId,message);}catch(error){this.connectionAlertTimes.delete(alertKey);throw error;}
+  }
   sharingStatus(id:number){return this.sharing.status(id);}
   shareProfile(id:number):Promise<void>{return this.sharing.share(id,true);}
   revokeProfile(id:number):void{this.sharing.revoke(id);}
   sharedProfiles(requesterTelegramId:number,offset=0){return this.sharing.list(requesterTelegramId,offset);}
-  syncAllowance(id:number){const student=this.store.getStudent(id);if(!student)throw new Error('Connect Moodle first.');return this.store.syncAllowance(student.telegramId,this.now());}
-  private allowanceText(id:number):string{const quota=this.syncAllowance(id);return `\n\n🔄 Daily full syncs: ${quota.used}/${quota.limit} used · ${quota.remaining} left\nResets at 00:00 Asia/Tashkent. Failed attempts count; duplicate queued taps do not.`;}
   async profile(id:number):Promise<MoodleProfile>{
     const student=this.store.getStudent(id);
     if(!student?.moodleCipher)throw new Error('Connect Moodle first.');
@@ -90,23 +132,24 @@ export class SyncService {
     }
     return `${this.publicUrl}/calendar/${raw}.ics`;
   }
-  async connect(linkToken: string, moodleToken: string,progress?:ConnectionProgress): Promise<string[]> {
+  async connect(linkToken: string, moodleToken: string,progress?:ConnectionProgress,notifyStudent=true): Promise<string[]> {
     const hash = hashSecret(linkToken); const original = this.store.byLink(hash,this.now());
     if (!original) throw new Error('Connection link expired. Send /connect in Telegram.');
     return this.locked(original.id, async () => {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
-      if(!this.store.consumeSync(original.telegramId,this.now()))throw new SyncLimitError();
       const snapshot = await this.moodle.snapshot(moodleToken,this.now(),false,progress);
-      this.requireVerifiedAssignmentStatus(snapshot);
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
-      progress?.('saving');
+      progress?.('dashboard');
       this.store.transaction(() => {
         // Reconnecting can use a different Moodle identity: remove all previous account data.
         for (const table of ['courses','items','done','classes','outbox','change_log','manual_sync_jobs','portal_sessions','submission_operations','profile_shares']) this.store.db.prepare(`DELETE FROM ${table} WHERE studentId=?`).run(original.id);
         this.store.patchStudent(original.id,{moodleCipher:this.vault.seal(moodleToken,`moodle:${original.id}`),linkHash:null,linkExpires:null,calendarHash:null,calendarCipher:null,paused:false,initialized:false});
+        this.store.clearConnectionLinkName(original.id);
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
         this.store.metric('connection_success',this.now());
-        this.store.enqueue(original.id,`connected:${hash}`,'✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
+        if(notifyStudent)this.store.enqueue(original.id,`connected:${hash}`,snapshot.warnings.length
+          ? `⚠️ Moodle connected with limited coverage\n\nYour available courses and tasks are ready. Some Moodle information could not be read (${snapshot.warnings.length} limitation${snapshot.warnings.length===1?'':'s'}). The saved dashboard shows the data Moodle provided. Tap 🔄 Sync later to check again.`
+          : '✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
       });
       return snapshot.warnings;
     });
@@ -114,23 +157,16 @@ export class SyncService {
   async sync(id: number, manual=true): Promise<void> {
     await this.synchronize(id,manual,true);
   }
-  private requireVerifiedAssignmentStatus(snapshot:Awaited<ReturnType<MoodleGateway['snapshot']>>):void {
-    const warning=snapshot.warnings.find(value=>value.startsWith(ASSIGNMENT_STATUS_WARNING)||value.startsWith('Assignment submission status is unavailable;'));
-    if(!warning)return;
-    const error=new MoodleError('Moodle did not verify assignment submission and grade status. No incomplete snapshot was saved.',true,'upstream');
-    error.operation='mod_assign_get_submission_status';throw error;
-  }
   async refresh(id:number):Promise<string> {
     const result=await this.synchronize(id,true,false);
     if(!result)throw new Error('Connect Moodle before refreshing.');
-    return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent')+this.allowanceText(id);
+    return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');
   }
   requestRefresh(id:number):string {
     if(!this.store.getStudent(id)?.moodleCipher)return 'Connect Moodle first.';
     if(this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id))return '🔄 Sync is already queued or running. I’ll send the result here.';
-    if(this.syncAllowance(id).remaining===0)throw new SyncLimitError();
     const inserted=this.store.db.prepare('INSERT OR IGNORE INTO manual_sync_jobs(studentId,requestId,requestedAt) VALUES(?,?,?)').run(id,newSecret(),this.now());
-    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.\nThis uses one of your 5 daily full sync attempts.' : '🔄 Sync is already queued or running. I’ll send the result here.';
+    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.' : '🔄 Sync is already queued or running. I’ll send the result here.';
   }
   processManualJobs():Promise<void> {
     if(this.manualWork)return this.manualWork;
@@ -139,7 +175,7 @@ export class SyncService {
       await mapConcurrent(jobs,2,async job=>{
         const id=Number(job.studentId);
         let text:string;
-        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);return;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent')+this.allowanceText(id);}
+        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);return;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');}
         catch(error){text='⚠️ Sync unavailable\n\n'+syncFailure(error);}
         this.store.transaction(()=>{
           if(!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=? AND requestId=?').get(id,job.requestId))return;
@@ -159,12 +195,10 @@ export class SyncService {
   private async synchronize(id:number,manual:boolean,notify:boolean):Promise<RefreshResult|null> {
     return this.locked(id, async () => {
       const s = this.store.getStudent(id); if (!s?.moodleCipher || (s.paused && !manual)) return null;
-      if(manual&&!this.store.consumeSync(s.telegramId,this.now()))throw new SyncLimitError();
       try {
         this.store.setMeta(`lastSyncAttempt:${id}`,String(this.now()));
         const token = this.vault.open(s.moodleCipher,`moodle:${id}`);
         const snapshot = await this.moodle.snapshot(token,this.now());
-        this.requireVerifiedAssignmentStatus(snapshot);
         const latest = this.store.getStudent(id);
         if (!latest || latest.moodleCipher!==s.moodleCipher || (latest.paused && !manual)) return null;
         const previousItems=this.store.rawItems(id);
@@ -237,6 +271,7 @@ export class SyncService {
   }
   async tick(): Promise<void> {
     // Website reads happen only after received Moodle events or explicit student actions.
+    this.store.pruneConnectionLinkNames(this.now());
     const jobs=[this.processManualJobs(),this.processEvents()];
     this.reminders();await Promise.allSettled([...jobs,this.deliver()]);
     await this.deliver();

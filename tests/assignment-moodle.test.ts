@@ -17,6 +17,11 @@ test('fresh assignment reads evaluated permissions, exact teacher rules and stat
  const f=readerFixture(),detail=await f.client.assignment(token,5,1,now);assert.equal(detail.canEdit,true);assert.equal(detail.canSubmit,false);assert.equal(detail.dueAt,now+2000);assert.equal(detail.maxFiles,3);assert.deepEqual(detail.acceptedTypes,['.pdf','.docx']);assert.equal(detail.statement,'This is my own work.');assert.equal(detail.attachments[0].url,site+'/webservice/pluginfile.php/10/mod_assign/introattachment/0/brief.pdf');assert.doesNotMatch(JSON.stringify(detail),/private-student-token|Private Student/);assert.equal(detail.revision.length,64);
  await assert.rejects(f.client.assignment(token,6,1,now),/not released/);await assert.rejects(f.client.assignment(token,5,99,now),/no longer available/);
 });
+test('missing Moodle permission fields remain unconfirmed and cannot enable editing or submission',async()=>{
+ const f=readerFixture();delete f.last.canedit;delete f.last.cansubmit;
+ const detail=await f.client.assignment(token,5,1,now);
+ assert.equal(detail.status,'draft');assert.equal(detail.canEdit,false);assert.equal(detail.canSubmit,false);assert.equal(detail.availability,'unknown');
+});
 test('hidden sections are inaccessible and groups, timed activities and unhandled plugin requirements remain read-only',async()=>{
  const f=readerFixture();f.sections[0].uservisible=false;await assert.rejects(f.client.assignment(token,5,1,now),/not released/);assert.ok(!f.calls.includes('mod_assign_get_submission_status'));
  for(const patch of [{teamsubmission:1},{timelimit:3600},{configs:[{subtype:'assignsubmission',plugin:'mahara',name:'enabled',value:'1'}]}]){const g=readerFixture();Object.assign(g.assignment,patch);assert.ok((await g.client.assignment(token,5,1,now)).unsupportedReason);}

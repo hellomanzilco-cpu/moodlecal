@@ -13,10 +13,10 @@ test('application boots from a fresh database without live credentials and serve
   t.after(async()=>{if(!exited){child.kill();await new Promise(resolve=>child.once('exit',resolve));}rmSync(temp,{recursive:true,force:true});});
   const address=await new Promise<string>((resolve,reject)=>{
     const timer=setTimeout(()=>reject(new Error('Startup timeout')),10000);
-    child.stdout.on('data',data=>{const match=/listening at (http:\/\/[^\s]+)/.exec(String(data));if(match){clearTimeout(timer);resolve(match[1].replace(/\.$/,''));}});
+    child.stdout.on('data',data=>{const match=/listening at (http:\/\/[^\s"}]+)/.exec(String(data));if(match){clearTimeout(timer);resolve(match[1].replace(/\.$/,''));}});
     child.once('exit',code=>{clearTimeout(timer);reject(new Error('Startup exited '+code));});
   });
   assert.equal((await fetch(address+'/healthz')).status,200);
   assert.equal((await fetch(address+'/readyz')).status,503);
-  assert.match(await (await fetch(address+'/connect')).text(),/Connect Moodle/);
+  const retired=await fetch(address+'/connect');assert.equal(retired.status,410);assert.match(await retired.text(),/private Telegram bot chat/);
 });

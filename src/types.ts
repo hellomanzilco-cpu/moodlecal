@@ -44,7 +44,7 @@ export interface AssignmentGateway {
   saveSubmission(token:string,assignmentId:number,draftId:number|null,text:string|undefined):Promise<void>;
   submitForGrading(token:string,assignmentId:number,acceptStatement:boolean):Promise<void>;
 }
-export type ConnectionStage = 'authenticating' | 'courses' | 'assignments' | 'calendar' | 'saving';
+export type ConnectionStage = 'connecting' | 'authenticating' | 'profile' | 'synchronizing' | 'dashboard';
 export type ConnectionProgress = (stage:ConnectionStage)=>void;
 export interface Identity { userId: number; name: string; functions: string[]; firstName?:string;lastName?:string;username?:string }
 export interface MoodleProfile {firstName:string;lastName:string;username:string}
@@ -63,6 +63,7 @@ export interface ClassEntry {
 }
 export interface OutboxEntry { id: number; studentId: number; chatId: number; text: string; attempts: number; interactive?:number }
 export interface MoodleGateway {
+  checkReachable?(): Promise<void>;
   identify(token: string): Promise<Identity>;
   login(username: string, password: string): Promise<string>;
   snapshot(token: string, now: number, assignmentsOnly?:boolean, progress?:ConnectionProgress): Promise<Snapshot>;
@@ -74,5 +75,11 @@ export interface ReplyMarkup {
   one_time_keyboard?:boolean;
   input_field_placeholder?:string;
 }
-export interface MessageOptions { reply_markup?:ReplyMarkup }
-export interface Messenger { send(chatId: number, text: string, options?:MessageOptions): Promise<void>;sendDocument?(chatId:number,name:string,bytes:Buffer,caption:string):Promise<void> }
+export interface MessageOptions { reply_markup?:ReplyMarkup; parse_mode?:'HTML' }
+export interface Messenger {
+  send(chatId: number, text: string, options?:MessageOptions): Promise<void>;
+  sendWithId?(chatId:number,text:string,options?:MessageOptions):Promise<number>;
+  editMessage?(chatId:number,messageId:number,text:string,options?:MessageOptions):Promise<void>;
+  deleteMessage?(chatId:number,messageId:number):Promise<void>;
+  sendDocument?(chatId:number,name:string,bytes:Buffer,caption:string):Promise<void>;
+}

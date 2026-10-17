@@ -58,7 +58,8 @@ function fixture(overrides: Record<string, unknown> = {}, functions = [...requir
 
 test('normalizes student deadlines, resources and group calendar without duplicate activity events', async () => {
   const { client, requests } = fixture();
-  const result = await client.snapshot(token, now);
+  const phases:string[]=[];const result = await client.snapshot(token, now,false,phase=>phases.push(phase));
+  assert.deepEqual(phases,['profile','synchronizing']);
   assert.deepEqual(result.courses, [{ id: 8, name: 'Economics', shortname: 'ECO' }]);
   assert.equal(result.warnings.length, 0);
   assert.equal(result.items.length, 4);
@@ -87,27 +88,36 @@ test('normalizes student deadlines, resources and group calendar without duplica
   assert.equal(calendar.get('options[timeend]'), String(now + 180 * 86400));
 });
 
-test('temporary submission-status outage fails the whole snapshot instead of accepting unknown status',async()=>{
+test('temporary submission-status outage keeps assignment data and marks its status unverified',async()=>{
   const f=fixture();f.fail('mod_assign_get_submission_status');
-  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.reason==='network');
-  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
-  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
+  const snapshot=await f.client.snapshot(token,now);
+  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
+  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
+  assert.ok(f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
+  assert.ok(f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
 });
 
-test('submission-status API errors expose only Moodle’s sanitized error code',async()=>{
+test('submission-status API errors do not discard assignment data or expose Moodle debug text',async()=>{
   const f=fixture({mod_assign_get_submission_status:{exception:'moodle_exception',errorcode:'nopermissiontoaccesspage',message:'private Moodle debug response'}});
-  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.apiErrorCode==='nopermissiontoaccesspage'&&!error.message.includes('private Moodle debug response'));
+  const snapshot=await f.client.snapshot(token,now);
+  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
+  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
+  assert.doesNotMatch(JSON.stringify(snapshot),/private Moodle debug response/);
 });
 
-test('a successful but incomplete status response cannot authorize an incomplete snapshot',async()=>{
+test('an incomplete status response leaves the assignment visible but unverified',async()=>{
   const f=fixture({mod_assign_get_submission_status:{lastattempt:{submission:{status:'new'}},warnings:[]}});
-  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.apiErrorCode==='incomplete_lastattempt');
+  const snapshot=await f.client.snapshot(token,now);
+  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
+  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
 });
 
-test('assignment status API is required before course data can be presented as ready',async()=>{
+test('assignment details remain available as unverified when the status API is not enabled',async()=>{
   const f=fixture({},['core_enrol_get_users_courses','core_course_get_contents','mod_assign_get_assignments']);
-  await assert.rejects(f.client.snapshot(token,now),error=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.reason==='permission');
-  assert.equal(f.requests.length,1);
+  const snapshot=await f.client.snapshot(token,now);
+  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
+  assert.ok(snapshot.warnings.some(warning=>warning.includes('Assignment details can still be shown')));
+  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_assign_get_submission_status'));
 });
 
 test('same-name same-size file replacements keep their changed modification timestamp', async () => {
@@ -180,11 +190,19 @@ test('an unexpected optional API failure aborts the snapshot with sanitized text
   });
 });
 
-test('invalid token and missing mandatory capabilities fail before returning identity', async () => {
+test('invalid token and missing mandatory capabilities fail in their actual profile and synchronization stages', async () => {
   const invalid = fixture({ core_webservice_get_site_info: { exception: 'webservice_access_exception', errorcode: 'invalidtoken', message: token } });
   await assert.rejects(invalid.client.identify(token), (error: unknown) => error instanceof MoodleError && !error.retryable && !error.message.includes(token));
   const restricted = fixture({}, ['core_course_get_contents']);
-  await assert.rejects(restricted.client.identify(token), /cannot read enrolled courses/);
+  await assert.rejects(restricted.client.snapshot(token,now), /cannot read enrolled courses/);
+});
+
+test('site reachability is checked without credentials and reports an HTTP status safely',async()=>{
+ let seenUrl='';let seenOptions:RequestInit|undefined;
+ const ok:typeof fetch=async(input,options={})=>{seenUrl=String(input);seenOptions=options;return new Response(null,{status:200});};
+ await new MoodleClient(site,ok).checkReachable();assert.equal(seenUrl,`${site}/login/index.php`);assert.equal(seenOptions?.method,'GET');assert.equal(seenOptions?.body,undefined);assert.equal(seenOptions?.redirect,'manual');
+ const unavailable:typeof fetch=async()=>new Response(null,{status:503});
+ await assert.rejects(new MoodleClient(site,unavailable).checkReachable(),(error:unknown)=>error instanceof MoodleError&&error.reason==='network'&&error.operation==='moodle_reachability'&&error.httpStatus===503);
 });
 
 test('submitted personal work is completed; team members who still need to submit are incomplete', async () => {
@@ -232,6 +250,13 @@ test('username/password login uses POST without retaining private token response
   assert.equal(seen!.parameters.get('username'), 'student');
   assert.equal(seen!.parameters.get('password'), 'password-secret');
   assert.equal(seen!.parameters.get('service'), 'moodle_mobile_app');
+});
+
+test('known invalid login responses are distinguished from service and network failures',async()=>{
+ const invalid:typeof fetch=async()=>Response.json({error:'invalid login'});
+ await assert.rejects(new MoodleClient(site,invalid).login('student','wrong'),(error:unknown)=>error instanceof MoodleError&&error.reason==='authentication'&&error.operation==='login_token'&&error.apiErrorCode==='invalidlogin'&&/rejected/.test(error.message));
+ const extraStep:typeof fetch=async()=>Response.json({errorcode:'forcepasswordchange',message:'private server detail'});
+ await assert.rejects(new MoodleClient(site,extraStep).login('student','password'),(error:unknown)=>error instanceof MoodleError&&error.reason==='upstream'&&error.apiErrorCode==='forcepasswordchange'&&!/private server detail/.test(error.message));
 });
 
 test('network failures and rate limits are retryable without exposing raw fetch messages', async () => {

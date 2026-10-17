@@ -72,14 +72,14 @@ function addFileReceipt(f:ReturnType<typeof assignmentFixture>){
 test('async connection acknowledges blocked authentication and reports real stages without exposing credentials',async t=>{
  const f=connectFixture(),login=deferred<string>(),snapshot=deferred(),entered=deferred();
  t.after(async()=>{login.resolve('temporary-moodle-token');snapshot.resolve();await f.close();});
- f.setLogin(()=>login.promise);f.setSnapshot(async progress=>{progress?.('courses');progress?.('assignments');entered.resolve();await snapshot.promise;});
+ f.setLogin(()=>login.promise);f.setSnapshot(async progress=>{progress?.('profile');progress?.('synchronizing');entered.resolve();await snapshot.promise;});
  const {account,raw}=f.student(),attemptId=newSecret();
  const accepted=await bounded(Promise.resolve(f.connect(raw,attemptId)));
  assert.equal(accepted.statusCode,202);assert.deepEqual(accepted.json(),{accepted:true,attemptId});
- let state=await f.status(raw,attemptId);assert.equal(state.json().status,'working');assert.equal(state.json().phase,'authenticating');assert.equal(state.json().percent,10);
+ let state=await f.status(raw,attemptId);assert.equal(state.json().status,'working');assert.equal(state.json().phase,'authenticating');assert.equal(state.json().percent,20);assert.equal(state.json().authStatus,'pending');
  assert.equal(f.calls.snapshot,0);assert.equal(f.store.getStudent(account.id)!.moodleCipher,null);
  login.resolve('temporary-moodle-token');await entered.promise;
- state=await f.status(raw,attemptId);assert.equal(state.json().phase,'assignments');assert.equal(state.json().percent,60);assert.equal(state.json().status,'working');
+ state=await f.status(raw,attemptId);assert.equal(state.json().phase,'synchronizing');assert.equal(state.json().percent,65);assert.equal(state.json().status,'working');assert.equal(state.json().profileStatus,'loaded');
  assert.equal(f.store.getStudent(account.id)!.moodleCipher,null);
  assert.doesNotMatch(state.body,/synthetic-password|synthetic-user|temporary-moodle-token|linkHash/);
  snapshot.resolve();state=await f.finished(raw,attemptId);assert.equal(state.json().status,'complete');assert.equal(state.json().percent,100);
@@ -94,7 +94,7 @@ test('an asynchronous failed reconnect reports failure and preserves the previou
  f.setLogin(async()=>{await login.promise;throw new MoodleError('upstream URL with a private password',true,'network');});
  assert.equal((await f.connect(raw,attemptId)).statusCode,202);login.resolve('unused');
  const state=await f.finished(raw,attemptId);assert.equal(state.json().status,'failed');assert.notEqual(state.json().percent,100);
- assert.match(state.json().error,/UWED Moodle is not responding/);assert.doesNotMatch(state.body,/private password|prior-private-token|synthetic-password/);
+ assert.match(state.json().error,/does not mean your credentials are wrong/);assert.doesNotMatch(state.body,/private password|prior-private-token|synthetic-password/);
  assert.equal(f.store.getStudent(account.id)!.moodleCipher,prior);assert.equal(f.calls.snapshot,0);
  assert.ok(f.store.byLink(hashSecret(raw),Math.floor(Date.now()/1000)));
 });
@@ -124,14 +124,6 @@ test('three blocked connection jobs cap global work while the health endpoint re
  for(const own of students.slice(0,3))assert.equal((await f.connect(own.raw)).statusCode,202);
  const rejected=await f.connect(students[3].raw);assert.equal(rejected.statusCode,429);assert.match(rejected.body,/Connections are busy/);assert.equal(f.calls.login,3);assert.equal(f.calls.snapshot,0);
  assert.deepEqual((await bounded(Promise.resolve(f.app.inject({url:'/healthz'})))).json(),{ok:true});
-});
-
-test('exhausted daily full-sync allowance is rejected before Moodle credential exchange and survives disconnect',async t=>{
- const f=connectFixture();t.after(()=>f.close());let own=f.student();
- for(let index=0;index<5;index++)assert.equal(f.store.consumeSync(own.account.telegramId),true);
- assert.equal((await f.connect(own.raw)).statusCode,429);assert.equal(f.calls.login,0);assert.equal(f.calls.snapshot,0);
- f.store.deleteStudent(own.account.id);own=f.student();
- const response=await f.connect(own.raw);assert.equal(response.statusCode,429);assert.match(response.body,/5 daily full Moodle sync attempts/);assert.equal(f.calls.login,0);
 });
 
 test('an async-mode request without an attempt ID is rejected before any Moodle request',async t=>{

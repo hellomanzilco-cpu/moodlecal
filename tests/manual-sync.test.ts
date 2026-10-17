@@ -61,7 +61,7 @@ test('Sync, old Auto update and slash sync share a single cooldown and queued op
  await send('🔄 Sync');assert.match(f.sent.at(-1)!,/Sync requested/);assert.equal(f.calls,0);
  await send('🔄 Auto update');assert.match(f.sent.at(-1)!,/Please wait/);
  await send('/sync');assert.match(f.sent.at(-1)!,/Please wait/);
- await send('📝 Assignments');assert.match(f.sent.at(-1)!,/Your assignments/,'menus must respond while a sync is queued');
+ await send('📝 Assignments');assert.match(f.sent.at(-1)!,/ASSIGNMENTS DASHBOARD/,'menus must respond while a sync is queued');
  await f.service.processManualJobs();assert.equal(f.calls,1);
 });
 test('manual sync distinguishes limited checks and identifies a failed API step while preserving the snapshot',async t=>{

@@ -18,7 +18,7 @@ npm run account:check
 
 The script logs in, reads assignment statuses, and writes private reports to `data/account-report.md` and `data/account-report.json`. It separates outstanding work (including drafts), submitted work awaiting grading, and submitted graded work. Outstanding assignments are further distinguished by current availability: open, upcoming, restricted, closed, or unknown. A zero grade counts as graded. Personal done marks do not change Moodle submission states. No assignments, submissions, or grades are modified.
 
-The `.env` and reports are ignored by Git. Keep passwords in the file and never paste them into Telegram or chat.
+The `.env` and reports are ignored by Git. Keep operator credentials in that file; never commit or post them.
 
 Existing keys named `Bot_token`, `Moodle_username`, and `Moodle_password` are supported. If you already have a credentials file, `npm run setup -- --complete` adds missing application settings while preserving the values you supplied. `npm run bot:info` checks the bot identity without sending any messages.
 
@@ -69,15 +69,15 @@ npm test
 npm start
 ```
 
-Open a **private chat** with your bot, press Start, and tap **🔗 Connect Moodle**. New students see only this button. With public HTTPS hosting, it opens a private Mini App window inside Telegram. Enter your Moodle username and password and accept the consent checkbox; there is no token field on this screen. The server exchanges those credentials with UWED's HTTPS token endpoint and stores the resulting token encrypted. Passwords are not written to the database and should never be sent in a Telegram message.
+Open a **private chat** with your bot, press Start, and tap **🔗 Connect Moodle**. New students see only this button. No browser, Web App or external form opens. The bot asks for the Moodle username and then the password directly in the private chat. The password passes through Telegram to the bot server for sign-in only; the app does not store it and attempts to delete the Telegram message after processing. The server exchanges the credentials with Moodle and stores the resulting token encrypted.
 
-An animated tube follows actual server stages: sign-in, courses, assignments, calendar, and saving. It turns green only after the connection is saved, or red on failure. Progress requests read the current connection attempt; they do not initiate additional Moodle checks. Return to Telegram updates the menu based on the saved account connection. The window, welcome, pre-Start description, and bio identify the independent creator and contact.
+The bot edits one Telegram message through the real stages: Moodle availability, sign-in, profile loading, course and assignment synchronization, and dashboard preparation. It reports a partial result separately from failure and sends the live dashboard after a successful or limited-coverage connection. Password messages are excluded from the durable inbox and are never sent to the operator. Failed or limited-coverage attempts retain an encrypted Telegram display name and safe stage/error details for up to 90 days. If `OWNER_TELEGRAM_ID` is configured, operational failures and limited coverage also generate a sanitized private alert. HTTP access logs contain only method, route template, status and duration.
 
 `localhost` links work only on the computer running the app. To connect from a phone, receive Moodle events, or let a calendar provider fetch feeds, use a public HTTPS address and set `PUBLIC_URL` accordingly. This is required even with Telegram long polling, which only retrieves incoming Telegram messages and never checks Moodle. Plain HTTP is accepted only for local development.
 
 Reconnecting establishes a fresh baseline and clears the previous connection's timetable, completion marks, course preferences, and calendar URL. Tap **🗓 Calendar** again and replace your subscription after reconnecting.
 
-If UWED requires browser SSO, MFA, CAPTCHA, or denies mobile token creation, the username/password method may fail. An authorized existing mobile-service token can still be used by the local operator inspection tools; it is not exposed in the student sign-in form. A university-approved connection method may otherwise be necessary. The project does not bypass authentication controls.
+If UWED requires browser SSO, MFA, CAPTCHA, or denies mobile token creation, the username/password method may fail. The bot cannot complete additional SSO, MFA, CAPTCHA or password-change steps and will not bypass them or send students to a browser login. It reports that extra verification is required and directs the student to university support.
 
 ## Student menu
 
@@ -95,7 +95,7 @@ Press Start to open the persistent keyboard. Connected students see six buttons:
 | 📰 Recent updates | Read your saved website change history. |
 | 🗓 Calendar | Your private calendar subscription URL. |
 | ⚙️ Settings | Alerts, time zone, connection status, reconnect, help, and disconnect. |
-| 🔗 Connect Moodle | A temporary private sign-in window inside Telegram. |
+| 🔗 Connect Moodle | Starts username and password steps in the private bot chat. |
 
 Under **📝 Assignments**, choose **⏳ Next deadlines**, **🕓 Later / undated**, **📨 Awaiting grades**, or **✅ Graded**. The nearest future deadline in each course determines its current assignment group; tied deadlines stay together, and early submission does not advance the next group before that deadline passes. Accessible unfinished overdue work remains visible. This is a planning rule, not proof that a teacher released an assignment. Drafts remain outstanding; a zero grade counts as graded. Missing access information is reported without guessing. Personal done marks do not submit work or modify grades.
 
@@ -108,7 +108,7 @@ Slash commands remain available for compatibility and advanced controls:
 | Command | Action |
 | --- | --- |
 | `/start`, `/help` | Show help and connection instructions. |
-| `/connect` | Create a temporary browser connection link. |
+| `/connect` | Start the in-chat Moodle username and password flow. |
 | `/courses` | List your enrolled courses and their IDs. |
 | `/mute COURSE_ID`, `/unmute COURSE_ID` | Manage a course's inclusion in your assistant. |
 | `/today`, `/week` | Show upcoming classes and dated work. |
@@ -135,7 +135,7 @@ Select your work, read any teacher statement, review filenames and requirements,
 
 The bot accepts up to **10 files / 20 MiB total**, subject to stricter teacher file count, per-file size, formats, word limit, opening/cutoff and editing permissions. Replacing existing work needs an explicit replacement confirmation. Group/timed assignments, unsupported plugins or file-type groups, and larger files must use Moodle. A draft is never presented as submitted. An uncertain write is not retried; verify its status first. [Detailed behavior and recovery](docs/ASSIGNMENTS.md).
 
-The public `/privacy` page explains account data and aggregate analytics. Set `OWNER_TELEGRAM_ID` to your verified numeric Telegram user ID in `.env` and cloud variables. Only that account sees **More → 📊 Bot statistics**, with Today, 7-day and Refresh buttons. Other accounts cannot open it by typing the button text or `/stats`; authorization never uses a username. The page shows current registered/connected/paused account counts and aggregate activity since tracking was enabled, using Asia/Tashkent dates. Disconnect removes an account from current totals; these are not lifetime signups. No student names, usernames, credentials or individual activity histories appear.
+The public `/privacy` page explains account data and aggregate analytics. Set `OWNER_TELEGRAM_ID` to your verified numeric Telegram user ID in `.env` and cloud variables. Only that account sees **More → 📊 Bot statistics**, with Today, 7-day and Refresh buttons. The configured account also receives sanitized alerts for actionable Moodle connection failures and limited coverage. Other accounts cannot open the statistics by typing the button text or `/stats`; authorization never uses a username. The page shows current registered/connected/paused account counts and aggregate activity since tracking was enabled, using Asia/Tashkent dates. Disconnect removes an account from current totals; these are not lifetime signups. No student names, usernames, credentials or individual activity histories appear in aggregate statistics.
 
 Operators can also run `npm run stats` locally or `node /app/scripts/stats.mjs` through authenticated Railway SSH. There is no public statistics or student roster endpoint.
 

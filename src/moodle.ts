@@ -22,6 +22,7 @@ export class MoodleError extends Error {
   readonly userMessage: string;
   operation?: string;
   apiErrorCode?: string;
+  httpStatus?: number;
   warningCodes?: string[];
 
   constructor(message: string, retryable = false, reason: MoodleError['reason'] = 'upstream') {
@@ -190,6 +191,21 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
 
   private network=new ConcurrencyGate(6,64);
   private failures=0;private openUntil=0;
+  async checkReachable():Promise<void>{
+    const signal=requestSignal(REQUEST_TIMEOUT_MS);
+    try{
+      const response=await this.network.run(()=>this.fetchImpl(`${this.baseUrl}/login/index.php`,{method:'GET',redirect:'manual',signal}),signal);
+      try{await response.body?.cancel();}catch{}
+      if(response.status===429||response.status>=500){const error=new MoodleError('UWED Moodle is not responding. Try again when the site is available.',true,'network');error.operation='moodle_reachability';error.httpStatus=response.status;throw error;}
+      if(response.status===404){const error=new MoodleError('The Moodle sign-in page was not found at this site address.',false,'upstream');error.operation='moodle_reachability';error.apiErrorCode='login_page_not_found';error.httpStatus=404;throw error;}
+      this.failures=0;
+    }catch(error){
+      if(error instanceof MoodleError)throw error;
+      const timeout=error instanceof Error&&(error.name==='AbortError'||error.name==='TimeoutError');
+      const failure=new MoodleError(timeout?'The Moodle connection check timed out. Try again later.':'UWED Moodle is not responding. Try again when the site is available.',true,'network');
+      failure.operation='moodle_reachability';failure.apiErrorCode=timeout?'timeout':'unreachable';throw failure;
+    }
+  }
   private async request(path: string, parameters: Record<string, Parameter>, allowWarning?: (warning:RecordValue)=>boolean): Promise<unknown> {
     if(Date.now()<this.openUntil)throw new MoodleError('UWED Moodle is temporarily unavailable. Please try again in 30 seconds.',true,'network');
     const signal=requestSignal(REQUEST_TIMEOUT_MS);
@@ -210,16 +226,18 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
         signal,
       });
       if (!response.ok) {
-        throw new MoodleError(
+        const error=new MoodleError(
           response.status === 429 ? 'Moodle is busy. Please try again later.' : 'Moodle could not be reached. Please try again.',
           response.status === 429 || response.status >= 500,
           response.status>=500?'network':'upstream',
         );
+        error.httpStatus=response.status;
+        throw error;
       }
       const content = (await boundedBody(response,20_000_000)).toString('utf8');
       let data: unknown;
       try { data = JSON.parse(content); } catch {
-        throw new MoodleError('Moodle returned an unreadable response. Please try again.', true);
+        const error=new MoodleError('Moodle returned an unreadable response. Please try again.', true);error.apiErrorCode='invalid_response';throw error;
       }
       if (data && typeof data === 'object' && !Array.isArray(data)) {
         const result = object(data);
@@ -227,6 +245,12 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
           const code = typeof result.errorcode === 'string' ? result.errorcode : '';
           const safeCode=/^[a-zA-Z0-9_-]{1,80}$/.test(code)?code:'unknown';
           const coded=(error:MoodleError):MoodleError=>{error.apiErrorCode=safeCode;return error;};
+          if(path==='/login/token.php'&&/(?:invalidlogin|invalid\s+login|invalid\s+username\s+or\s+password|incorrect\s+username\s+or\s+password)/i.test(`${code} ${String(result.error??'')}`)){
+            const error=coded(new MoodleError('Moodle rejected the supplied username or password. Check them and try again.',false,'authentication'));error.operation='login_token';error.apiErrorCode='invalidlogin';throw error;
+          }
+          if(path==='/login/token.php'&&/(?:forcepasswordchange|usernotfullysetup|captcha|multifactor|two.factor|one.time.password|\botp\b)/i.test(`${code} ${String(result.error??'')}`)){
+            const error=coded(new MoodleError('Moodle requires an additional account or verification step before sign-in can finish.',false,'upstream'));error.operation='login_token';if(safeCode==='unknown')error.apiErrorCode='additional_authentication';throw error;
+          }
           if (/invalidtoken|expiredtoken|invalidlogin|usernotfullysetup|forcepasswordchange|requireloginerror/i.test(code)) {
             throw coded(new MoodleError('Your Moodle connection is no longer valid. Please reconnect your account.',false,'authentication'));
           }
@@ -246,7 +270,8 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     } catch (error) {
       if (error instanceof MoodleError) throw error;
       if(error instanceof CapacityError)throw new MoodleError(error.message,true);
-      throw new MoodleError('Moodle could not be reached. Please try again.', true,'network');
+      const timeout=error instanceof Error&&(error.name==='AbortError'||error.name==='TimeoutError');
+      const failure=new MoodleError(timeout?'Moodle request timed out. Please try again.':'Moodle could not be reached. Please try again.',true,'network');failure.apiErrorCode=timeout?'timeout':'unreachable';throw failure;
     }
   }
 
@@ -261,7 +286,13 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       username: username.trim(), password, service: 'moodle_mobile_app',
     }));
     if (typeof data.token !== 'string' || !data.token.trim()) {
-      throw new MoodleError('Moodle did not issue an access token. Check your login and mobile web service access.');
+      const loginError=String(data.errorcode??data.error??'').trim().toLowerCase().replace(/[ _-]/g,'');
+      if(['invalidlogin','invalidusernameorpassword','incorrectusernameorpassword'].includes(loginError)){
+        const error=new MoodleError('Moodle rejected the supplied username or password. Check them and try again.',false,'authentication');
+        error.operation='login_token';error.apiErrorCode='invalidlogin';throw error;
+      }
+      const error=new MoodleError('Moodle did not issue an access token. Check Moodle account and mobile web service access.',false,'upstream');
+      error.operation='login_token';error.apiErrorCode=/^[a-z0-9_-]{1,80}$/i.test(String(data.errorcode??''))?String(data.errorcode):undefined;throw error;
     }
     return data.token;
   }
@@ -270,9 +301,6 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     if (!token.trim()) throw new MoodleError('Your Moodle access token is missing. Please reconnect your account.');
     const data = object(await this.call(token, 'core_webservice_get_site_info'));
     const functions = list(data.functions).map((entry) => object(entry).name).filter((name): name is string => typeof name === 'string');
-    if (REQUIRED.some((functionName) => !functions.includes(functionName))) {
-      throw new MoodleError('Your Moodle token cannot read enrolled courses and course content. Ask the university to enable these mobile web service functions.');
-    }
     return { userId: id(data.userid), name: moodleText(data.fullname) || moodleText(data.username) || 'Student', functions,
       firstName:moodleText(data.firstname),lastName:moodleText(data.lastname),username:typeof data.username==='string'?data.username.trim():'' };
   }
@@ -338,7 +366,9 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     return withDeadline(90000,()=>this.snapshotData(token,now,assignmentsOnly,progress));
   }
   private async snapshotData(token:string,now:number,assignmentsOnly:boolean,progress?:ConnectionProgress):Promise<Snapshot>{
+    progress?.('profile');
     const identity = await this.identify(token);
+    progress?.('synchronizing');
     const available = new Set(identity.functions);
     const warnings: string[] = [];
     const supports = (functionName: string, limitation: string): boolean => {
@@ -350,15 +380,14 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       if(available.has(functionName))return;
       const error=new MoodleError(message,false,'permission');error.operation=functionName;throw error;
     };
+    for(const functionName of REQUIRED)requireFunction(functionName,'Moodle sign-in succeeded, but your account cannot read enrolled courses and course contents. Ask university IT to enable the required mobile web service functions.');
     requireFunction(ASSIGNMENTS,'Moodle has not enabled assignment details for this connection. Ask the university to enable the mobile assignment service.');
-    requireFunction(SUBMISSIONS,'Moodle has not enabled submission status and grade access for this connection. Ask the university to enable the mobile assignment status service.');
     const hasAssignments = true;
-    const hasSubmissions = true;
+    const hasSubmissions = supports(SUBMISSIONS, `${ASSIGNMENT_STATUS_WARNING} Assignment details can still be shown, but affected statuses remain unverified.`);
     const hasQuizzes = !assignmentsOnly && supports(QUIZZES, 'Quiz availability and deadlines are unavailable; only course activity changes are monitored.');
     const hasAttempts = !assignmentsOnly && supports(ATTEMPTS, 'Quiz attempt status is unavailable; completed quizzes may remain in priorities.');
     const hasCalendar = !assignmentsOnly && supports(CALENDAR, 'Moodle calendar events are unavailable; classes need a personal timetable.');
 
-    progress?.('courses');
     const courses: Course[] = list(await this.call(token, 'core_enrol_get_users_courses', { userid: identity.userId, returnusercount: false }))
       .map((raw) => {
         const course = object(raw);
@@ -400,7 +429,6 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
 
     const assignmentIds = new Set<number>();
     const quizIds = new Set<number>();
-    progress?.('assignments');
     if (courseIds.length && hasAssignments) {
       let restricted=0;
       const result = object(await this.call(token, ASSIGNMENTS, { courseids: courseIds },warning=>{
@@ -414,26 +442,37 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       }));
       if(restricted) warnings.push(`${restricted} assignment activities could not be inspected with your student account. Hidden activity details are not available.`);
       const submissionStatuses=new Map<number,RecordValue>();
+      const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
+      let unavailableStatusCount=0;
       if(hasSubmissions){
-        const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
-        await mapConcurrent(visible,1,async assignment=>{
+        let stopStatusRequests=false;
+        for(let index=0;index<visible.length;index++){
+          if(stopStatusRequests){unavailableStatusCount++;continue;}
+          const assignment=visible[index];
           const assignmentId=id(assignment.id);
-          const status=object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId}));
-          if(status.lastattempt===undefined&&!bool(assignment.nosubmissions)){
-            const error=new MoodleError('Moodle returned no student submission-status record for an assignment. Check the student role permissions for submission summaries.',false,'permission');
-            error.operation=SUBMISSIONS;error.apiErrorCode='missing_lastattempt';throw error;
-          }
-          if(status.lastattempt!==undefined&&!bool(assignment.nosubmissions)){
-            const last=object(status.lastattempt);
-            const required=['graded','submissionsenabled','locked','cansubmit','extensionduedate'];
-            if(required.some(field=>last[field]===undefined)||(last.canedit===undefined&&last.caneditowner===undefined)){
-              const error=new MoodleError('Moodle returned an incomplete student submission-status record. The snapshot was not saved.',true,'upstream');
-              error.operation=SUBMISSIONS;error.apiErrorCode='incomplete_lastattempt';throw error;
+          try{
+            const status=object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId}));
+            if(status.lastattempt===undefined&&!bool(assignment.nosubmissions)){
+              const error=new MoodleError('Moodle returned no student submission-status record for an assignment. Check the student role permissions for submission summaries.',false,'permission');
+              error.operation=SUBMISSIONS;error.apiErrorCode='missing_lastattempt';throw error;
             }
+            if(status.lastattempt!==undefined&&!bool(assignment.nosubmissions)){
+              const last=object(status.lastattempt);
+              const required=['graded','submissionsenabled','locked','cansubmit','extensionduedate'];
+              if(required.some(field=>last[field]===undefined)||(last.canedit===undefined&&last.caneditowner===undefined)){
+                const error=new MoodleError('Moodle returned an incomplete student submission-status record. The snapshot was not saved.',true,'upstream');
+                error.operation=SUBMISSIONS;error.apiErrorCode='incomplete_lastattempt';throw error;
+              }
+            }
+            submissionStatuses.set(assignmentId,status);
+          }catch(error){
+            if(!(error instanceof MoodleError)||error.reason==='authentication')throw error;
+            unavailableStatusCount++;
+            if(error.reason==='network')stopStatusRequests=true;
           }
-          submissionStatuses.set(assignmentId,status);
-        });
+        }
       }
+      if(unavailableStatusCount)warnings.push(`${ASSIGNMENT_STATUS_WARNING} Status is unverified for ${unavailableStatusCount} of ${visible.length} visible assignments.`);
       for (const rawCourse of list(result.courses)) {
         const courseData = object(rawCourse);
         const course = courseMap.get(id(courseData.id));
@@ -529,7 +568,6 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       }
     }
 
-    progress?.('calendar');
     if (hasCalendar) {
       const groupIds = new Set<number>();
       if (available.has(GROUPS)) {

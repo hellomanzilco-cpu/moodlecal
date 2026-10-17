@@ -2,7 +2,7 @@ import { loadEnvFile } from 'node:process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { loadConfig } from '../src/config.ts';
 import { envValue } from '../src/env.ts';
-import { MoodleClient } from '../src/moodle.ts';
+import { MoodleClient,MoodleError } from '../src/moodle.ts';
 import { Store } from '../src/store.ts';
 import { Vault } from '../src/security.ts';
 import { SyncService } from '../src/sync.ts';
@@ -11,7 +11,8 @@ try {
   loadEnvFile('.env');const config=loadConfig();
   const moodle=new MoodleClient(config.moodleUrl);
   const token=envValue(process.env,'MOODLE_TOKEN') || await moodle.login(envValue(process.env,'MOODLE_USERNAME') || '',envValue(process.env,'MOODLE_PASSWORD') || '');
-  await moodle.identify(token);
+  const identity=await moodle.identify(token);
+  if(['core_enrol_get_users_courses','core_course_get_contents'].some(name=>!identity.functions.includes(name)))throw new MoodleError('Your Moodle token cannot read enrolled courses and course content. Ask the university to enable these mobile web service functions.',false,'permission');
   const response=await fetch(`https://api.telegram.org/bot${config.telegramToken}/getMe`,{method:'POST',signal:AbortSignal.timeout(15000)});
   const data=await response.json();
   if(!response.ok || data.ok!==true || typeof data.result?.username!=='string' || !/^[A-Za-z0-9_]+$/.test(data.result.username)) throw new Error('Bot unavailable');

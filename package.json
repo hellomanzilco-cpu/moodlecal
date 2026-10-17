@@ -21,7 +21,8 @@
     "backup": "node scripts/backup.mjs",
     "backup:migrate-legacy": "node scripts/secure-legacy-backups.mjs",
     "backup:restore": "node scripts/restore-backup.mjs",
-    "stats": "node scripts/stats.mjs"
+    "stats": "node scripts/stats.mjs",
+    "connections:report": "node scripts/connection-report.mjs"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.4",

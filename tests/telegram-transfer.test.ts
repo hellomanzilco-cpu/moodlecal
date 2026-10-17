@@ -52,3 +52,16 @@ test('outgoing transport errors remain sanitized and do not strand the next comm
  const failed=client.send(101,'first');const next=client.send(101,'second');
  await assert.rejects(failed,error=>error instanceof TelegramError&&!error.message.includes(token));await next;assert.equal(calls,2);
 });
+
+test('progress messages can be edited and Telegram password messages can be deleted',async()=>{
+ const calls:{method:string;body:Record<string,unknown>}[]=[];
+ const client=new TelegramClient(token,async(input,init)=>{
+  calls.push({method:String(input).split('/').at(-1)!,body:JSON.parse(String(init?.body)) as Record<string,unknown>});
+  return Response.json({ok:true,result:{message_id:432}});
+ });
+ assert.equal(await client.sendWithId(101,'Connecting'),432);
+ await client.editMessage(102,432,'Credentials verified');
+ await client.deleteMessage(103,987);
+ assert.deepEqual(calls.map(value=>value.method),['sendMessage','editMessageText','deleteMessage']);
+ assert.equal(calls[1].body.message_id,432);assert.equal(calls[1].body.text,'Credentials verified');assert.equal(calls[2].body.message_id,987);
+});

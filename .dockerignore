@@ -12,5 +12,6 @@ scripts/*
 !scripts/restore-backup.mjs
 !scripts/secure-legacy-backups.mjs
 !scripts/stats.mjs
+!scripts/connection-report.mjs
 /images.png
 docs

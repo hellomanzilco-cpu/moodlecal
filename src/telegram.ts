@@ -79,18 +79,43 @@ export class TelegramClient implements Messenger {
   }
 
   async send(chatId: number, text: string, options?: MessageOptions): Promise<void> {
-    return this.forChat(chatId,async()=>{
+    await this.forChat(chatId,async()=>{
       const chunks = splitTelegramText(text);
       for (const [index, chunk] of chunks.entries()) {
         await this.slot(chatId);
-        await this.request('sendMessage', { chat_id: chatId, text: chunk, link_preview_options: { is_disabled: true }, ...(index === chunks.length - 1 && options?.reply_markup ? { reply_markup: options.reply_markup } : {}) });
+        await this.request('sendMessage', { chat_id: chatId, text: chunk, link_preview_options: { is_disabled: true }, ...(options?.parse_mode ? { parse_mode: options.parse_mode } : {}), ...(index === chunks.length - 1 && options?.reply_markup ? { reply_markup: options.reply_markup } : {}) });
       }
     });
   }
-  private async forChat(chatId:number,action:()=>Promise<void>):Promise<void>{
+  async sendWithId(chatId:number,text:string,options?:MessageOptions):Promise<number>{
+    return this.forChat(chatId,async()=>{
+      const chunks=splitTelegramText(text);let lastId:number|null=null;
+      for(const [index,chunk]of chunks.entries()){
+        await this.slot(chatId);
+        const sent=await this.request('sendMessage',{chat_id:chatId,text:chunk,link_preview_options:{is_disabled:true},...(options?.parse_mode?{parse_mode:options.parse_mode}:{}),...(index===chunks.length-1&&options?.reply_markup?{reply_markup:options.reply_markup}:{})});
+        const message=sent&&typeof sent==='object'&&!Array.isArray(sent)?sent as Record<string,unknown>:{};
+        if(typeof message.message_id==='number'&&Number.isSafeInteger(message.message_id))lastId=message.message_id;
+      }
+      if(lastId===null)throw new TelegramError('Telegram did not return the progress message identifier.');
+      return lastId;
+    });
+  }
+  async editMessage(chatId:number,messageId:number,text:string,options?:MessageOptions):Promise<void>{
+    return this.forChat(chatId,async()=>{
+      await this.slot(chatId);
+      await this.request('editMessageText',{chat_id:chatId,message_id:messageId,text,link_preview_options:{is_disabled:true},...(options?.parse_mode?{parse_mode:options.parse_mode}:{})});
+    });
+  }
+  async deleteMessage(chatId:number,messageId:number):Promise<void>{
+    return this.forChat(chatId,async()=>{
+      await this.slot(chatId);
+      await this.request('deleteMessage',{chat_id:chatId,message_id:messageId});
+    });
+  }
+  private async forChat<T>(chatId:number,action:()=>Promise<T>):Promise<T>{
     const work=(this.queues.get(chatId)||Promise.resolve()).then(action);
-    const tail=work.catch(()=>{});this.queues.set(chatId,tail);
-    try{await work;}finally{if(this.queues.get(chatId)===tail)this.queues.delete(chatId);}
+    const tail=work.then(()=>undefined,()=>undefined);this.queues.set(chatId,tail);
+    try{return await work;}finally{if(this.queues.get(chatId)===tail)this.queues.delete(chatId);}
   }
   private async slot(chatId:number):Promise<void>{
     const chatWait=(this.lastChat.get(chatId)||0)+1000-Date.now();if(chatWait>0)await new Promise(resolve=>setTimeout(resolve,chatWait));

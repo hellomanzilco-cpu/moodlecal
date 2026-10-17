@@ -63,6 +63,18 @@ test('queued updates retain encrypted minimal payload, omit Telegram identity me
  inbox.accept([update],true);await settle(inbox);assert.equal(received.length,1);
 });
 
+test('credential messages bypass the durable inbox and preserve the Telegram message id for deletion',async t=>{
+ const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),received:unknown[]=[];
+ const secret='private-moodle-password-not-for-sqlite';
+ const inbox=new TelegramInbox(store,vault,async value=>{received.push(value);store.finishUpdate((value as {update_id:number}).update_id,NOW);},()=>NOW,()=>true);
+ t.after(async()=>{await inbox.drain();store.close();});
+ inbox.accept([{...message(81,101,secret),message:{...message(81,101,secret).message,message_id:123}}],true);
+ await settle(inbox);
+ assert.equal(pending(store),0);assert.equal(store.hasUpdate(81),true);
+ assert.deepEqual(received[0],{update_id:81,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},message_id:123,text:secret}});
+ assert.doesNotMatch(JSON.stringify(store.db.prepare('SELECT * FROM telegram_inbox').all()),new RegExp(secret));
+});
+
 test('duplicates before, during and after processing execute one command and keep offset monotonic',async t=>{
  const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),gate=deferred();let calls=0;
  const inbox=new TelegramInbox(store,vault,async value=>{calls++;await gate.promise;store.finishUpdate((value as {update_id:number}).update_id,NOW);},()=>NOW);
