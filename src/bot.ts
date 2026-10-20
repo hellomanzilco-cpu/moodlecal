@@ -147,7 +147,7 @@ export class Bot {
     let text=rawText?.trim()??null;
     const webApp=record(message?.web_app_data);
     if(text===null && typeof webApp?.data==='string'){
-      try{const action=record(JSON.parse(webApp.data))?.action;if(action==='connected')text='/start connected';else if(action==='assignment_updated')text='📝 Assignments';}catch{ /* Never trust Mini App data as account authorization. */ }
+      try{const action=record(JSON.parse(webApp.data))?.action;if(action==='connected')text='/start connected';else if(action==='refresh_connection')text='/connect';else if(action==='assignment_updated')text='📝 Assignments';}catch{ /* Never trust Mini App data as account authorization. */ }
     }
     if (!message || !from || !chat || chat.type !== 'private' || from.is_bot === true ||
         !Number.isSafeInteger(from.id) || Number(from.id) <= 0 || from.id !== chat.id || text===null) {
@@ -211,6 +211,7 @@ export class Bot {
     if(command==='disconnect')command='disconnectmenu';
     if(command==='autoupdate')command='sync';
     let arg = slash ? (slash[2] || '').trim() : '';
+    if(command==='start'&&arg==='connect'){command='connect';arg='';}
     if(command==='nextpage'||command==='previouspage'){
       const page=this.pages.get(id);
       if(page){page.offset=Math.max(0,Math.min(Math.floor((page.total-1)/6)*6,page.offset+(command==='nextpage'?6:-6)));command=page.command;arg=page.arg;}
@@ -232,7 +233,7 @@ export class Bot {
       reply=greeting+'\n\n'+await this.command(student,'assignments','');
     } else if (command === 'start' || command === 'help' || command === 'menu') {
       if(command==='start')this.connectionWindows.delete(id);
-      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Welcome to Moodle Calendar\n\nAn independent study planner by Tursunov Sunnatilla, not created by UWED.\n\nConnect your Moodle account to see your courses, assignment deadlines, submission status, grades Moodle makes visible, and course updates. Use the existing menu to explore assignments and your weekly plan.\n\nTap 🔗 Connect Moodle below. Sign-in opens in a private window inside Telegram.\n\nContact: @sunnatilla_tursunov';
+      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Welcome to Moodle Calendar\n\nAn independent study planner by Tursunov Sunnatilla, not created by UWED.\n\nConnect your Moodle account to see assignment deadlines, submission status and grades.\n\n1. Tap 🔗 Connect Moodle below.\n2. Sign in with your usual Moodle username and password in the private Telegram window.\n3. Your courses and assignments appear after Moodle verifies them.\n\nNo separate registration. Your password is not stored.\n\nContact: @sunnatilla_tursunov';
       if(command==='start' && /^pair_[A-Za-z0-9_-]{43}$/.test(arg) && this.services.claimPairing) {
         try {
           const connected=await this.services.claimPairing(id,arg.slice(5));

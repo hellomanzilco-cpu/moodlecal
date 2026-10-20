@@ -70,6 +70,10 @@ Disconnect deletes active local student data and revokes future calendar fetches
 
 ## Delivery and monitoring
 
+The connection window checks its 15-minute private link through `POST /api/connect/check` before displaying credentials and again before sending them. This checks only the local link; it makes no Moodle request, saves no connection and consumes no full-sync allowance. Expired, used or missing links offer **Get a new sign-in button**. In the Telegram keyboard Web App, this sends only `refresh_connection` to the bot; the bot issues a fresh capability for the verified sender of that private chat. The action cannot connect an account by itself. The browser fallback opens the bot with `start=connect`. Passwords never appear in these messages.
+
+If the browser loses the initial connection response, the window checks the existing attempt's status rather than automatically repeating sign-in. Support references and coverage warnings remain visible. The onboarding UI does not change which Moodle API checks are required or which optional coverage limitations the backend permits.
+
 The notification outbox retries transient failures and survives restarts. Delivery is at least once: a crash after Telegram accepts a message but before local acknowledgement can produce a duplicate. Cached command replies prevent completed timetable commands from rerunning after a transient reply failure. Telegram refusal can pause the affected student; after restoring access, use **Settings → Resume alerts**. Telegram rate limits postpone retries according to the supplied delay.
 
 Deadline reminders use saved active deadlines only. They do not query Moodle on a timer. Future, restricted, closed, or unknown-availability assignments are excluded; open assignments without deadlines have no fabricated date or reminder. Unsuitable or stale cached data can suppress reminders. A student's manual refresh can update cached state before the university connection is available.

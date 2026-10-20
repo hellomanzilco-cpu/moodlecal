@@ -382,8 +382,9 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
     };
     for(const functionName of REQUIRED)requireFunction(functionName,'Moodle sign-in succeeded, but your account cannot read enrolled courses and course contents. Ask university IT to enable the required mobile web service functions.');
     requireFunction(ASSIGNMENTS,'Moodle has not enabled assignment details for this connection. Ask the university to enable the mobile assignment service.');
+    requireFunction(SUBMISSIONS,'Moodle has not enabled submission status and grade access for this connection. Ask the university to enable the mobile assignment status service.');
     const hasAssignments = true;
-    const hasSubmissions = supports(SUBMISSIONS, `${ASSIGNMENT_STATUS_WARNING} Assignment details can still be shown, but affected statuses remain unverified.`);
+    const hasSubmissions = true;
     const hasQuizzes = !assignmentsOnly && supports(QUIZZES, 'Quiz availability and deadlines are unavailable; only course activity changes are monitored.');
     const hasAttempts = !assignmentsOnly && supports(ATTEMPTS, 'Quiz attempt status is unavailable; completed quizzes may remain in priorities.');
     const hasCalendar = !assignmentsOnly && supports(CALENDAR, 'Moodle calendar events are unavailable; classes need a personal timetable.');
@@ -443,36 +444,26 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       if(restricted) warnings.push(`${restricted} assignment activities could not be inspected with your student account. Hidden activity details are not available.`);
       const submissionStatuses=new Map<number,RecordValue>();
       const visible=list(result.courses).map(object).flatMap(course=>list(course.assignments).map(object)).filter(assignment=>!moduleRestriction(modules.get(id(assignment.cmid))));
-      let unavailableStatusCount=0;
       if(hasSubmissions){
-        let stopStatusRequests=false;
         for(let index=0;index<visible.length;index++){
-          if(stopStatusRequests){unavailableStatusCount++;continue;}
           const assignment=visible[index];
           const assignmentId=id(assignment.id);
-          try{
-            const status=object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId}));
-            if(status.lastattempt===undefined&&!bool(assignment.nosubmissions)){
-              const error=new MoodleError('Moodle returned no student submission-status record for an assignment. Check the student role permissions for submission summaries.',false,'permission');
-              error.operation=SUBMISSIONS;error.apiErrorCode='missing_lastattempt';throw error;
-            }
-            if(status.lastattempt!==undefined&&!bool(assignment.nosubmissions)){
-              const last=object(status.lastattempt);
-              const required=['graded','submissionsenabled','locked','cansubmit','extensionduedate'];
-              if(required.some(field=>last[field]===undefined)||(last.canedit===undefined&&last.caneditowner===undefined)){
-                const error=new MoodleError('Moodle returned an incomplete student submission-status record. The snapshot was not saved.',true,'upstream');
-                error.operation=SUBMISSIONS;error.apiErrorCode='incomplete_lastattempt';throw error;
-              }
-            }
-            submissionStatuses.set(assignmentId,status);
-          }catch(error){
-            if(!(error instanceof MoodleError)||error.reason==='authentication')throw error;
-            unavailableStatusCount++;
-            if(error.reason==='network')stopStatusRequests=true;
+          const status=object(await this.call(token,SUBMISSIONS,{assignid:assignmentId,userid:identity.userId}));
+          if(status.lastattempt===undefined&&!bool(assignment.nosubmissions)){
+            const error=new MoodleError('Moodle returned no student submission-status record for an assignment. Check the student role permissions for submission summaries.',false,'permission');
+            error.operation=SUBMISSIONS;error.apiErrorCode='missing_lastattempt';throw error;
           }
+          if(status.lastattempt!==undefined&&!bool(assignment.nosubmissions)){
+            const last=object(status.lastattempt);
+            const required=['graded','submissionsenabled','locked','cansubmit','extensionduedate'];
+            if(required.some(field=>last[field]===undefined)||(last.canedit===undefined&&last.caneditowner===undefined)){
+              const error=new MoodleError('Moodle returned an incomplete student submission-status record. The snapshot was not saved.',true,'upstream');
+              error.operation=SUBMISSIONS;error.apiErrorCode='incomplete_lastattempt';throw error;
+            }
+          }
+          submissionStatuses.set(assignmentId,status);
         }
       }
-      if(unavailableStatusCount)warnings.push(`${ASSIGNMENT_STATUS_WARNING} Status is unverified for ${unavailableStatusCount} of ${visible.length} visible assignments.`);
       for (const rawCourse of list(result.courses)) {
         const courseData = object(rawCourse);
         const course = courseMap.get(id(courseData.id));

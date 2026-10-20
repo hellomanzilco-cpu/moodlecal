@@ -16,6 +16,13 @@ const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(r=>res
 const pending=(store:Store)=>Number(store.db.prepare('SELECT COUNT(*) AS count FROM telegram_inbox').get()!.count);
 async function settle(inbox:TelegramInbox,rounds=3){for(let i=0;i<rounds;i++){await turn();inbox.pump();}await turn();}
 
+test('fresh-link Mini App requests survive inbox normalization with no student identifier or credentials from the payload',async t=>{
+ const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),received:unknown[]=[];
+ const inbox=new TelegramInbox(store,vault,async update=>{received.push(update);store.finishUpdate((update as {update_id:number}).update_id,NOW);},()=>NOW);
+ t.after(async()=>{await inbox.drain();store.close();});
+ inbox.accept([{update_id:1,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'refresh_connection',studentId:999,password:'private-secret'})}}}]);
+ await settle(inbox);assert.deepEqual(received,[{update_id:1,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:'{"action":"refresh_connection"}'}}}]);
+});
 test('a slow chat does not block another student and later commands stay in strict chat order',async t=>{
  const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),gate=deferred();
  const started:number[]=[],finished:number[]=[];

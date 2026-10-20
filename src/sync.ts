@@ -6,7 +6,7 @@ import type { Item, Messenger, MoodleGateway, MoodleProfile, ConnectionProgress 
 import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
-import { MoodleError } from './moodle.ts';
+import { MoodleError, ASSIGNMENT_STATUS_WARNING } from './moodle.ts';
 import { assignmentLink } from './assignment-session.ts';
 import {ProfileSharingService} from './profile-sharing.ts';
 import {telegramDisplayName,telegramDisplayNameContext} from './connection-diagnostics.ts';
@@ -138,6 +138,7 @@ export class SyncService {
     return this.locked(original.id, async () => {
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
       const snapshot = await this.moodle.snapshot(moodleToken,this.now(),false,progress);
+      this.requireVerifiedAssignmentStatus(snapshot);
       if (!this.store.byLink(hash,this.now())) throw new Error('Connection link expired. Send /connect in Telegram.');
       progress?.('dashboard');
       this.store.transaction(() => {
@@ -156,6 +157,11 @@ export class SyncService {
   }
   async sync(id: number, manual=true): Promise<void> {
     await this.synchronize(id,manual,true);
+  }
+  private requireVerifiedAssignmentStatus(snapshot:Awaited<ReturnType<MoodleGateway['snapshot']>>):void {
+    if(!snapshot.warnings.some(warning=>warning.startsWith(ASSIGNMENT_STATUS_WARNING)||warning.startsWith('Assignment submission status is unavailable;')))return;
+    const error=new MoodleError('Moodle did not verify assignment submission and grade status. No incomplete snapshot was saved.',true,'upstream');
+    error.operation='mod_assign_get_submission_status';error.apiErrorCode='unverified_submission_status';throw error;
   }
   async refresh(id:number):Promise<string> {
     const result=await this.synchronize(id,true,false);
@@ -199,6 +205,7 @@ export class SyncService {
         this.store.setMeta(`lastSyncAttempt:${id}`,String(this.now()));
         const token = this.vault.open(s.moodleCipher,`moodle:${id}`);
         const snapshot = await this.moodle.snapshot(token,this.now());
+        this.requireVerifiedAssignmentStatus(snapshot);
         const latest = this.store.getStudent(id);
         if (!latest || latest.moodleCipher!==s.moodleCipher || (latest.paused && !manual)) return null;
         const previousItems=this.store.rawItems(id);

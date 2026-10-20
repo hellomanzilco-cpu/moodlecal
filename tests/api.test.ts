@@ -18,7 +18,7 @@ function fixture() {
   const service=new SyncService(store,vault,moodle,{async send(){}},config.publicUrl,300);
   const app=createApp(config,store,service,moodle,async update=>{updates.push(update);});
   const s=store.ensureStudent(111,111);const raw=new URLSearchParams(new URL(service.connectLink(s.id)).hash.slice(1)).get('token')!;
-  return {config,store,service,app,s,raw,updates,get usedPassword(){return usedPassword;},set fail(value:boolean){fail=value;}};
+  return {config,store,service,app,moodle,s,raw,updates,get usedPassword(){return usedPassword;},set fail(value:boolean){fail=value;}};
 }
 test('connection page opens as the Telegram Web App and keeps its one-time token out of the page body',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
@@ -83,6 +83,19 @@ test('limited coverage is saved as partial and sends a sanitized alert to the co
  const record=store.connectionAttempts(0)[0];assert.equal(record.status,'partial');assert.equal(record.stage,'synchronizing');assert.equal(record.failureCategory,'partial_coverage');assert.ok(record.displayNameCipher);assert.doesNotMatch(record.displayNameCipher!,/Amina|private-moodle-name|private-password/);
  assert.equal(sent.length,1);assert.equal(sent[0].chatId,999);assert.match(sent[0].text,/Amina Student/);assert.match(sent[0].text,/synchronization/);assert.match(sent[0].text,/CONN-/);assert.doesNotMatch(sent[0].text,/private-moodle-name|private-password|private-token|Quiz availability/);
 });
+test('submission-status failures stop newcomer and reconnect flows without replacing existing account data',async t=>{
+  for(const reconnect of [false,true]){
+    const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+    if(reconnect)await f.service.connect(f.raw,'previous-account-token');
+    const previous=f.store.getStudent(f.s.id)!,items=f.store.rawItems(f.s.id);
+    const raw=reconnect?new URLSearchParams(new URL(f.service.connectLink(f.s.id)).hash.slice(1)).get('token')!:f.raw;
+    f.moodle.snapshot=async(_token,_now,_only,progress)=>{progress?.('profile');progress?.('synchronizing');const error=new MoodleError('private Moodle response',true,'network');error.operation='mod_assign_get_submission_status';error.apiErrorCode='timeout';throw error;};
+    const response=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:f.config.publicUrl},payload:{linkToken:raw,username:'private-student',password:'private-password',consent:true}});
+    assert.equal(response.statusCode,503);assert.match(response.body,/required course and assignment data could not be synchronized/);assert.doesNotMatch(response.body,/private Moodle response|private-student|private-password/);
+    const after=f.store.getStudent(f.s.id)!;assert.equal(after.moodleCipher,previous.moodleCipher);assert.equal(after.lastSyncAt,previous.lastSyncAt);assert.deepEqual(f.store.rawItems(f.s.id),items);
+    const attempt=f.store.connectionAttempts(0)[0];assert.equal(attempt.status,'failed');assert.equal(attempt.stage,'synchronizing');assert.equal(attempt.operation,'mod_assign_get_submission_status');assert.equal(attempt.apiErrorCode,'timeout');
+  }
+});
 test('connect enforces origin and uses one-time links; password is never returned or stored',async t => {
   const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
   const payload={linkToken:f.raw,username:'alice',password:'very-secret-password',consent:true};
@@ -120,6 +133,23 @@ test('connection requires explicit consent before any credential exchange',async
     const response=await f.app.inject({method:'POST',url:'/api/connect',headers:{origin:'https://planner.test'},payload:{linkToken:f.raw,username:'alice',password:'private-password',consent}});
     assert.equal(response.statusCode,400);assert.equal(f.usedPassword,'');assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);
   }
+});
+test('link preflight rejects expired and consumed links without contacting Moodle or revealing student data',async t=>{
+  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+  const payload={linkToken:f.raw},headers={origin:f.config.publicUrl};
+  const check=(value=payload,origin=headers)=>f.app.inject({method:'POST',url:'/api/connect/check',headers:origin,payload:value});
+  assert.equal((await check(payload,{origin:'https://other.test'})).statusCode,403);
+  const ready=await check();assert.equal(ready.statusCode,200);assert.deepEqual(ready.json(),{ok:true});
+  assert.equal(f.usedPassword,'');assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);
+  assert.equal(f.store.connectionAttempts(0).length,0);
+  assert.equal((await check({linkToken:'x'.repeat(43)})).statusCode,410);
+  f.store.patchStudent(f.s.id,{linkExpires:Math.floor(Date.now()/1000)-1});
+  assert.equal((await check()).json().code,'connection_expired');assert.equal(f.usedPassword,'');
+  f.store.patchStudent(f.s.id,{linkExpires:Math.floor(Date.now()/1000)+300});
+  await f.service.connect(f.raw,'moodle-token');
+  assert.equal((await check()).statusCode,410);
+  const expired=await f.app.inject({method:'POST',url:'/api/connect',headers,payload:{...payload,username:'student',password:'not-sent-to-moodle',consent:true}});
+  assert.equal(expired.json().code,'connection_expired');assert.equal(f.usedPassword,'');
 });
 test('cloud connectivity failures return 503 without blaming credentials or consuming the connection link',async t=>{
  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});

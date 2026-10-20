@@ -88,35 +88,30 @@ test('normalizes student deadlines, resources and group calendar without duplica
   assert.equal(calendar.get('options[timeend]'), String(now + 180 * 86400));
 });
 
-test('temporary submission-status outage keeps assignment data and marks its status unverified',async()=>{
+test('temporary submission-status outage rejects the snapshot before optional endpoints run',async()=>{
   const f=fixture();f.fail('mod_assign_get_submission_status');
-  const snapshot=await f.client.snapshot(token,now);
-  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
-  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
-  assert.ok(f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
-  assert.ok(f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
+  await assert.rejects(f.client.snapshot(token,now),(error:unknown)=>error instanceof MoodleError&&error.reason==='network'&&error.operation==='mod_assign_get_submission_status');
+  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_quiz_get_quizzes_by_courses'));
+  assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='core_calendar_get_calendar_events'));
 });
 
-test('submission-status API errors do not discard assignment data or expose Moodle debug text',async()=>{
+test('submission-status API errors reject the snapshot and expose only safe diagnostic metadata',async()=>{
   const f=fixture({mod_assign_get_submission_status:{exception:'moodle_exception',errorcode:'nopermissiontoaccesspage',message:'private Moodle debug response'}});
-  const snapshot=await f.client.snapshot(token,now);
-  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
-  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
-  assert.doesNotMatch(JSON.stringify(snapshot),/private Moodle debug response/);
+  await assert.rejects(f.client.snapshot(token,now),(error:unknown)=>{
+    assert.ok(error instanceof MoodleError);assert.equal(error.reason,'permission');assert.equal(error.operation,'mod_assign_get_submission_status');assert.equal(error.apiErrorCode,'nopermissiontoaccesspage');assert.doesNotMatch(error.message,/private Moodle debug response/);return true;
+  });
 });
 
-test('an incomplete status response leaves the assignment visible but unverified',async()=>{
-  const f=fixture({mod_assign_get_submission_status:{lastattempt:{submission:{status:'new'}},warnings:[]}});
-  const snapshot=await f.client.snapshot(token,now);
-  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
-  assert.ok(snapshot.warnings.some(warning=>warning.includes('1 of 1 visible assignments')));
+test('missing and incomplete student status records both reject the snapshot',async()=>{
+  for(const [payload,code] of [[{warnings:[]},'missing_lastattempt'],[{lastattempt:{submission:{status:'new'}},warnings:[]},'incomplete_lastattempt']] as const){
+    const f=fixture({mod_assign_get_submission_status:payload});
+    await assert.rejects(f.client.snapshot(token,now),(error:unknown)=>error instanceof MoodleError&&error.operation==='mod_assign_get_submission_status'&&error.apiErrorCode===code);
+  }
 });
 
-test('assignment details remain available as unverified when the status API is not enabled',async()=>{
+test('a missing status API rejects the connection before reading assignment data',async()=>{
   const f=fixture({},['core_enrol_get_users_courses','core_course_get_contents','mod_assign_get_assignments']);
-  const snapshot=await f.client.snapshot(token,now);
-  assert.equal(snapshot.items.find(item=>item.key==='assignment:21')!.submissionStatus,'unknown');
-  assert.ok(snapshot.warnings.some(warning=>warning.includes('Assignment details can still be shown')));
+  await assert.rejects(f.client.snapshot(token,now),(error:unknown)=>error instanceof MoodleError&&error.reason==='permission'&&error.operation==='mod_assign_get_submission_status');
   assert.ok(!f.requests.some(request=>request.parameters.get('wsfunction')==='mod_assign_get_submission_status'));
 });
 

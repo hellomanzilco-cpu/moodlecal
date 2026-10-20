@@ -11,7 +11,7 @@ function normalized(value:unknown):{id:number;chatId:number;payload:unknown}|nul
   const text=typeof message.text==='string'?message.text.slice(0,4096):null;
   let data:string|null=null;
   if(text===null&&typeof webApp?.data==='string'&&webApp.data.length<=4096){
-    try{const action=object(JSON.parse(webApp.data))?.action;if(action==='connected'||action==='assignment_updated')data=JSON.stringify({action});}catch{/* Ignore unsupported Mini App data. */}
+    try{const action=object(JSON.parse(webApp.data))?.action;if(action==='connected'||action==='assignment_updated'||action==='refresh_connection')data=JSON.stringify({action});}catch{/* Ignore unsupported Mini App data. */}
   }
   if(text===null&&data===null)return {id,chatId:0,payload:null};
   return {id,chatId:from.id,payload:{update_id:id,message:{chat:{id:from.id,type:'private'},from:{id:from.id,is_bot:false},...(text===null?{web_app_data:{data}}:{text})}}};

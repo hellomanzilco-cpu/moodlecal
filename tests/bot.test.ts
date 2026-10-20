@@ -611,6 +611,14 @@ test('new students connect inside the Telegram Web App without requesting creden
  await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
  s.connected(101);await s.bot.handle(payload(101));assert.match(s.sent.at(-1)!.text,/ASSIGNMENTS DASHBOARD/);assert.match(s.sent.at(-1)!.text,/Moodle connected/);assert.ok(labels(s.sent.at(-1)!.options).includes('📅 Current deadlines this week'));assert.equal(s.sent.at(-1)!.options!.parse_mode,'HTML');
 });
+test('expired Mini App link recovery creates a fresh button only for the Telegram sender without binding an account',async t=>{
+ const s=setup(t);await s.send(101,'/start');const previous=s.calls.connect.length;
+ await s.bot.handle({update_id:100,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'refresh_connection',studentId:999,token:'forged-token',password:'not-a-password'})}}});
+ assert.equal(s.calls.connect.length,previous+1);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ assert.equal(s.store.byTelegram(101)!.moodleCipher,null);assert.equal(s.store.byTelegram(999),null);assert.equal(s.calls.sync.length,0);
+ assert.doesNotMatch(s.sent.at(-1)!.text,/forged-token|not-a-password/);
+ await s.send(101,'/start connect');assert.equal(s.calls.connect.length,previous+2);
+});
 test('successful Mini App return greets with the authenticated Moodle name without caching profile data',async t=>{
  const s=setup(t);s.connected(101,[{...item('assignment:1','Real assignment'),submissionStatus:'outstanding'}]);s.services.profile=async()=>({firstName:'<Amina>',lastName:'Student',username:'private_moodle_name'});
  const payload={update_id:101,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:'{"action":"connected"}'}}};await s.bot.handle(payload);

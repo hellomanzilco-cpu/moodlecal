@@ -51,6 +51,17 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
     reply.header('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}' https://telegram.org; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org`);
     return reply.type('text/html; charset=utf-8').send(connectionPage(nonce,config.moodleUrl));
   });
+  // Check the existing capability locally before a student types credentials.
+  // This neither contacts Moodle nor issues/revives a connection capability.
+  app.post<{Body:{linkToken:string}}>('/api/connect/check',{
+    schema:{body:{type:'object',additionalProperties:false,required:['linkToken'],properties:{linkToken:{type:'string',minLength:40,maxLength:100}}}},
+  },async(request,reply)=>{
+    if(request.headers.origin!==new URL(config.publicUrl).origin)return reply.code(403).send({error:'Open the connection window from Telegram.'});
+    const student=store.byLink(hashSecret(request.body.linkToken),Math.floor(Date.now()/1000));
+    request.body.linkToken='';
+    if(!student)return reply.code(410).send({code:'connection_expired',error:'This sign-in link has expired. Get a new Connect Moodle button in Telegram.'});
+    return {ok:true};
+  });
   app.post<{Body:{linkToken:string;attemptId:string}}>('/api/connect/status',{
     schema:{body:{type:'object',additionalProperties:false,required:['linkToken','attemptId'],properties:{linkToken:{type:'string',minLength:40,maxLength:100},attemptId:{type:'string',pattern:'^[A-Za-z0-9_-]{43}$'}}}},
   },async(request,reply)=>{
@@ -71,7 +82,7 @@ export function createApp(config: Config, store: Store, service: SyncService, mo
     if (rate && rate.expires>now && rate.count>=6) return reply.code(429).send({error:'Too many attempts. Request a fresh /connect link.'});
     rates.set(rateKey,{count:rate && rate.expires>now ? rate.count+1:1,expires:now+900});
     const student=store.byLink(rateKey,now);
-    if (!student) return reply.code(400).send({error:'Connection link expired. Send /connect in Telegram.'});
+    if (!student) return reply.code(400).send({code:'connection_expired',error:'This sign-in link has expired. Get a new Connect Moodle button in Telegram.'});
     const credentials={token:request.body.token,username:request.body.username,password:request.body.password};
     request.body.password='';request.body.token='';request.body.username='';request.body.linkToken='';
     const clearCredentials=()=>{credentials.password='';credentials.token='';credentials.username='';};
