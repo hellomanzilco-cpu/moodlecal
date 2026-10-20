@@ -87,6 +87,7 @@ export class Store {
     this.db.exec('DROP TABLE IF EXISTS sync_budgets');
     if(!this.db.prepare('PRAGMA table_info(outbox)').all().some(row=>row.name==='interactive'))this.db.exec('ALTER TABLE outbox ADD COLUMN interactive INTEGER NOT NULL DEFAULT 0');
     if(!this.db.prepare('PRAGMA table_info(telegram_inbox)').all().some(row=>row.name==='lane'))this.db.exec("ALTER TABLE telegram_inbox ADD COLUMN lane TEXT NOT NULL DEFAULT 'menu'");
+    if(!this.db.prepare('PRAGMA table_info(students)').all().some(row=>row.name==='language'))this.db.exec("ALTER TABLE students ADD COLUMN language TEXT NOT NULL DEFAULT 'en' CHECK(language IN ('en','uz','ru'))");
     this.pruneConnectionAttempts();
     this.db.prepare('DELETE FROM connection_link_names WHERE expires<=?').run(Math.floor(Date.now()/1000));
   }
@@ -159,7 +160,7 @@ export class Store {
   byLink(hash: string, now: number): Student | null { return student(this.db.prepare('SELECT * FROM students WHERE linkHash=? AND linkExpires>?').get(hash, now)); }
   byCalendar(hash: string): Student | null { return student(this.db.prepare('SELECT * FROM students WHERE calendarHash=? AND moodleCipher IS NOT NULL').get(hash)); }
   patchStudent(id: number, patch: Partial<Omit<Student, 'id' | 'telegramId' | 'chatId'>>) {
-    const allowed = new Set(['timezone','moodleCipher','calendarHash','calendarCipher','linkHash','linkExpires','lastSyncAt','nextSyncAt','lastError','initialized','paused']);
+    const allowed = new Set(['timezone','moodleCipher','calendarHash','calendarCipher','linkHash','linkExpires','lastSyncAt','nextSyncAt','lastError','initialized','paused','language']);
     const entries = Object.entries(patch);
     if (!entries.length) return;
     if (entries.some(([key]) => !allowed.has(key))) throw new Error('Invalid student field');

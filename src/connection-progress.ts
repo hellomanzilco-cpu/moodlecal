@@ -7,6 +7,7 @@ export const CONNECTION_PHASES:Record<ConnectionStage,{percent:number;label:stri
   dashboard:{percent:90,label:'Saving your data and preparing your dashboard…'},
 };
 export interface ConnectionState {
+  language?:import('./locale.ts').Language;
   phase:ConnectionStage;percent:number;label:string;status:'working'|'complete'|'partial'|'failed';
   serverStatus:'not_started'|'pending'|'reachable'|'unavailable';
   authStatus:'not_started'|'pending'|'verified'|'rejected'|'unknown';

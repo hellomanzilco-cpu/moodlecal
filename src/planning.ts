@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon';
+import {tr} from './locale.ts';
 import type { ClassEntry, Course, Item, Student } from './types.ts';
 
 export function formatTime(timestamp: number, timezone: string): string {
@@ -51,20 +52,21 @@ export function upcomingClasses(student: Student, entries: ClassEntry[], courses
   }
   return result.sort((a,b) => a.startsAt! - b.startsAt!);
 }
-export function prepareText(items: Item[], courseId?: number): string {
+export function prepareText(items: Item[], courseId?: number,lang:import('./locale.ts').Language='en'): string {
   const selected = items.filter(i => courseId === undefined || i.courseId === courseId);
   const materials = selected.filter(i => i.kind === 'resource' && isActionable(i, Math.floor(Date.now()/1000))).sort((a,b) => b.modifiedAt-a.modifiedAt).slice(0,8);
   const work = priorityItems(selected, Math.floor(Date.now()/1000)).slice(0,5);
-  const lines = ['Preparation checklist', 'Based on Moodle titles and descriptions; document contents have not been read.'];
-  if (!selected.length) return lines.join('\n') + '\nNo synced items for this course yet.';
+  const t=(source:string)=>tr(lang,source);
+  const lines = [t('Preparation checklist'),t('Based on Moodle titles and descriptions; document contents have not been read.')];
+  if (!selected.length) return lines.join('\n') + '\n'+t('No synced items for this course yet.');
   if (materials.length) {
-    lines.push('\nReview these recent materials:');
+    lines.push('\n'+t('Review these recent materials:'));
     for (const i of materials) lines.push(`• ${i.courseName}: ${i.title}\n${i.description.slice(0,350)}\n${i.url}\n[${i.key}]`);
   }
   if (work.length) {
-    lines.push('\nCheck requirements and complete these tasks:');
+    lines.push('\n'+t('Check requirements and complete these tasks:'));
     for (const i of work) lines.push(`• ${i.courseName}: ${i.title}\n${i.description.slice(0,350)}\n${i.url}\n[${i.key}]`);
   }
-  lines.push('\nConfirm the next class topic in Moodle and write down questions for the seminar. Tap 🎯 Priorities for the next deadline in each course.');
+  lines.push('\n'+t('Confirm the next class topic in Moodle and write down questions for the seminar.'));
   return lines.join('\n');
 }

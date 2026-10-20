@@ -51,6 +51,7 @@ export interface MoodleProfile {firstName:string;lastName:string;username:string
 export interface SharedProfile extends MoodleProfile {sharedAt:number}
 export interface SharedProfilePage {profiles:SharedProfile[];total:number;registered:number;offset:number}
 export interface Student {
+  language?:import('./locale.ts').Language;
   id: number; telegramId: number; chatId: number; timezone: string;
   moodleCipher: string | null; calendarHash: string | null; calendarCipher: string | null;
   linkHash: string | null; linkExpires: number | null;

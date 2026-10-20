@@ -48,7 +48,7 @@ test('capitalized and whitespace-prefixed network commands cannot exhaust worker
  const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),gate=deferred(),started:number[]=[];
  const inbox=new TelegramInbox(store,vault,async value=>{const id=(value as {update_id:number}).update_id;started.push(id);if(id<=6)await gate.promise;store.finishUpdate(id,NOW);},()=>NOW);
  t.after(async()=>{gate.resolve();await inbox.drain();store.close();});
- inbox.accept(['/PROFILE','  /profile',' /PROFILE@calmoodlebot ','  👤 Profile  ','/CONFIRMSHARING','  /start pair_'+('a'.repeat(43))].map((text,index)=>message(index+1,100+index,text)).concat([message(7,999,'🏠 Today')]));
+ inbox.accept(['/PROFILE','  👤 Профиль',' /PROFILE@calmoodlebot ','  👤 Profil  ','✅ Ha, profilimni ulashish','  /start pair_'+('a'.repeat(43))].map((text,index)=>message(index+1,100+index,text)).concat([message(7,999,'🏠 Today')]));
  await settle(inbox);assert.ok(started.includes(7),'cached menus must remain available while Moodle profile calls wait');assert.equal(started.filter(id=>id<=6).length,2);
  gate.resolve();await settle(inbox,8);assert.equal(pending(store),0);
 });

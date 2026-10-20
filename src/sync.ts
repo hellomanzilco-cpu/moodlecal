@@ -3,7 +3,7 @@ import { Store } from './store.ts';
 import { Vault, hashSecret, newSecret } from './security.ts';
 import { formatTime, priorityItems, isActionable } from './planning.ts';
 import type { Item, Messenger, MoodleGateway, MoodleProfile, ConnectionProgress } from './types.ts';
-import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage } from './changes.ts';
+import { findChanges, findCourseChanges, fingerprint, formatChanges, checkedCoverage,localizeChangeDetail } from './changes.ts';
 import type { RefreshResult } from './changes.ts';
 import { syncFailure } from './sync-errors.ts';
 import { MoodleError, ASSIGNMENT_STATUS_WARNING } from './moodle.ts';
@@ -11,6 +11,7 @@ import { assignmentLink } from './assignment-session.ts';
 import {ProfileSharingService} from './profile-sharing.ts';
 import {telegramDisplayName,telegramDisplayNameContext} from './connection-diagnostics.ts';
 import {mapConcurrent} from './limits.ts';
+import {language,tr} from './locale.ts';
 export { fingerprint } from './changes.ts';
 
 export class SyncService {
@@ -52,7 +53,8 @@ export class SyncService {
     this.store.patchStudent(id, {linkHash:hashSecret(raw),linkExpires:expires});
     return raw;
   }
-  connectLink(id:number):string{return `${this.publicUrl}/connect#token=${this.connectionToken(id)}`;}
+  connectLink(id:number):string{const lang=language(this.store.getStudent(id)?.language);return `${this.publicUrl}/connect${lang==='en'?'':'?lang='+lang}#token=${this.connectionToken(id)}`;}
+  get privacyUrl():string{return this.publicUrl+'/privacy';}
   assignmentLink(id:number,key:string):string{return assignmentLink(this.store,this.publicUrl,id,key,this.now());}
   rememberTelegramDisplayName(id:number,firstName:string,lastName:string):void {
     const name=telegramDisplayName(firstName,lastName);
@@ -106,10 +108,9 @@ export class SyncService {
     this.store.setMeta('ownerPairing',JSON.stringify({hash:hashSecret(raw),expires:this.now()+900,cipher:this.vault.seal(moodleToken,'owner-pairing')}));
     return raw;
   }
-  updatesStatus():string {
+  updatesStatus(lang:import('./locale.ts').Language='en'):string {
     const received=this.store.getMeta('moodleEventReceivedAt');
-    return received ? 'Moodle interval checks: off. Last signed website event: '+new Date(Number(received)*1000).toISOString()+'.'
-      : 'Moodle interval checks: off. Automatic website updates await a university-enabled Moodle event connection.';
+    return received?tr(lang,'Last signed website event: {time}. Moodle interval checks are off.',{time:new Date(Number(received)*1000).toISOString()}):tr(lang,'Automatic website updates await a university-enabled event connection.');
   }
   async claimPairing(id: number, raw: string): Promise<boolean> {
     return this.locked(0,async()=>{
@@ -148,9 +149,9 @@ export class SyncService {
         this.store.clearConnectionLinkName(original.id);
         this.store.saveSnapshot(original.id,snapshot,[],this.now(),this.now()+this.pollSeconds);
         this.store.metric('connection_success',this.now());
-        if(notifyStudent)this.store.enqueue(original.id,`connected:${hash}`,snapshot.warnings.length
-          ? `⚠️ Moodle connected with limited coverage\n\nYour available courses and tasks are ready. Some Moodle information could not be read (${snapshot.warnings.length} limitation${snapshot.warnings.length===1?'':'s'}). The saved dashboard shows the data Moodle provided. Tap 🔄 Sync later to check again.`
-          : '✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.');
+        if(notifyStudent)this.store.enqueue(original.id,`connected:${hash}`,tr(language(original.language),snapshot.warnings.length
+          ? '⚠️ Moodle connected with limited optional coverage. Open your assignments and check Settings → Status for details.'
+          : '✅ Moodle connected\n\nYour courses and tasks are ready. Open the main menu to view them. Tap 🔄 Sync whenever you want to check for changes.'));
       });
       return snapshot.warnings;
     });
@@ -166,13 +167,14 @@ export class SyncService {
   async refresh(id:number):Promise<string> {
     const result=await this.synchronize(id,true,false);
     if(!result)throw new Error('Connect Moodle before refreshing.');
-    return formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');
+    const student=this.store.getStudent(id);return formatChanges(result,student?.timezone||'Asia/Tashkent',language(student?.language));
   }
   requestRefresh(id:number):string {
-    if(!this.store.getStudent(id)?.moodleCipher)return 'Connect Moodle first.';
-    if(this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id))return '🔄 Sync is already queued or running. I’ll send the result here.';
+    const lang=language(this.store.getStudent(id)?.language);
+    if(!this.store.getStudent(id)?.moodleCipher)return tr(lang,'Connect Moodle first.');
+    if(this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id))return tr(lang,'🔄 Sync is already queued or running. I’ll send the result here.');
     const inserted=this.store.db.prepare('INSERT OR IGNORE INTO manual_sync_jobs(studentId,requestId,requestedAt) VALUES(?,?,?)').run(id,newSecret(),this.now());
-    return inserted.changes ? '🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.' : '🔄 Sync is already queued or running. I’ll send the result here.';
+    return tr(lang,inserted.changes?'🔄 Sync requested\n\nI’ll check Moodle and send the result here. You can keep using the menu.':'🔄 Sync is already queued or running. I’ll send the result here.');
   }
   processManualJobs():Promise<void> {
     if(this.manualWork)return this.manualWork;
@@ -181,8 +183,9 @@ export class SyncService {
       await mapConcurrent(jobs,2,async job=>{
         const id=Number(job.studentId);
         let text:string;
-        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);return;}text=formatChanges(result,this.store.getStudent(id)?.timezone || 'Asia/Tashkent');}
-        catch(error){text='⚠️ Sync unavailable\n\n'+syncFailure(error);}
+        const student=this.store.getStudent(id),lang=language(student?.language);
+        try{const result=await this.synchronize(id,true,false);if(!result){this.store.db.prepare('DELETE FROM manual_sync_jobs WHERE studentId=? AND requestId=?').run(id,job.requestId);return;}text=formatChanges(result,student?.timezone||'Asia/Tashkent',lang);}
+        catch(error){text=tr(lang,'⚠️ Sync unavailable')+'\n\n'+syncFailure(error,lang);}
         this.store.transaction(()=>{
           if(!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=? AND requestId=?').get(id,job.requestId))return;
           if(this.store.getStudent(id))this.store.enqueue(id,`manual-sync:${job.requestId}`,text,true);
@@ -195,8 +198,9 @@ export class SyncService {
   recentUpdates(id:number):string {
     const student=this.store.getStudent(id);if(!student)return 'Connect Moodle first.';
     const rows=this.store.recentChanges(id);
-    if(!rows.length)return '📰 Recent updates\n\nNo recorded website changes yet. Tap 🔄 Sync to compare Moodle with your saved snapshot.';
-    return '📰 Recent updates\n\n'+rows.map(({checkedAt,change})=>`${formatTime(checkedAt,student.timezone)} · ${change.courseName}\n${change.title}\n${change.details.map(detail=>'• '+detail).join('\n')}${change.url?'\n'+change.url:''}`).join('\n\n');
+    const lang=language(student.language);
+    if(!rows.length)return tr(lang,'📰 Recent updates')+'\n\n'+tr(lang,'No recorded website changes yet.');
+    return tr(lang,'📰 Recent updates')+'\n\n'+rows.map(({checkedAt,change})=>`${formatTime(checkedAt,student.timezone)} · ${change.courseName}\n${change.title}\n${change.details.map(detail=>'• '+localizeChangeDetail(detail,lang)).join('\n')}${change.url?'\n'+change.url:''}`).join('\n\n');
   }
   private async synchronize(id:number,manual:boolean,notify:boolean):Promise<RefreshResult|null> {
     return this.locked(id, async () => {
@@ -219,7 +223,8 @@ export class SyncService {
           if(muted.has(change.courseId??0))continue;
           const item=snapshot.items.find(item=>item.key===change.key) || previous.get(change.key);
           const label=change.type==='removed'?'No longer available':change.type==='new'?'New '+(item?.kind||'course'):'Updated '+(item?.kind||'course');
-          notices.push({key:`change:${change.key}:${item?fingerprint(item):hashSecret(JSON.stringify(change))}:${this.now()}:${change.type}`,text:`${label}: ${change.title}\n${change.courseName}\n${change.details.map(detail=>'• '+detail).join('\n')}\n${change.url}\n[${change.key}]`});
+          const lang=language(s.language),heading=lang==='en'?label:tr(lang,change.type==='removed'?'No longer available':change.type==='new'?'New item':'Updated item');
+          notices.push({key:`change:${change.key}:${item?fingerprint(item):hashSecret(JSON.stringify(change))}:${this.now()}:${change.type}`,text:`${heading}: ${change.title}\n${change.courseName}\n${change.details.map(detail=>'• '+localizeChangeDetail(detail,lang)).join('\n')}\n${change.url}`});
         }
         this.store.saveSnapshot(id,snapshot,notices,this.now(),this.now()+this.pollSeconds+randomInt(0,30),changes);
         this.store.metric('sync_success',this.now());if(snapshot.warnings.length)this.store.metric('sync_limited',this.now());
@@ -229,7 +234,7 @@ export class SyncService {
         const failedBefore = this.store.getStudent(id)?.lastError?.startsWith('Sync failed');
         this.store.metric('sync_failure',this.now());
         this.store.patchStudent(id,{lastError:'Sync failed. '+syncFailure(error),nextSyncAt:this.now()+Math.min(3600,this.pollSeconds*(failedBefore?4:1))});
-        if (notify && !failedBefore) this.store.enqueue(id,`failure:${s.lastSyncAt || 0}`,'Moodle sync failed. I kept your last successful data. Tap 🔄 Sync to try again, or check ⚙️ Settings → ℹ️ Status. Reconnect if your Moodle access has expired.');
+        if (notify && !failedBefore) this.store.enqueue(id,`failure:${s.lastSyncAt || 0}`,tr(language(s.language),'Moodle sync failed. I kept your last successful data. Tap Sync later, or check Settings → Status.'));
         throw error instanceof Error ? error : new Error('Moodle sync failed. Previous data has been preserved.');
       }
     });
@@ -246,7 +251,7 @@ export class SyncService {
         for (const hours of [24,1]) {
           // Catch up after restarts, sending only the most relevant threshold.
           if (remaining<=hours*3600 && remaining>(hours===24 ? 3600 : 0)) {
-            this.store.enqueue(id,`reminder:${item.key}:${item.dueAt}:${hours}`,`Deadline reminder: ${item.title}\n${item.courseName}\nDue ${formatTime(item.dueAt!,student.timezone)}\n${item.url}\n[${item.key}]`);
+            const lang=language(student.language);this.store.enqueue(id,`reminder:${item.key}:${item.dueAt}:${hours}`,tr(lang,'Deadline reminder: {title}',{title:item.title})+'\n'+item.courseName+'\n'+tr(lang,'Due: {time}',{time:formatTime(item.dueAt!,student.timezone)})+'\n'+item.url);
           }
         }
       }

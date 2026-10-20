@@ -1,11 +1,12 @@
 import {newSecret,hashSecret} from './security.ts';
 import type {Store} from './store.ts';
+import {language} from './locale.ts';
 export function assignmentLink(store:Store,origin:string,studentId:number,key:string,now=Math.floor(Date.now()/1000)):string {
  const student=store.getStudent(studentId);
  if(!student?.moodleCipher||!/^assignment:[1-9]\d*$/.test(key)||!store.rawItems(studentId).some(item=>item.key===key&&item.kind==='assignment'))throw new Error('Assignment not found in this account.');
  const raw=newSecret();store.db.prepare('DELETE FROM portal_sessions WHERE expires<=?').run(now);
  store.db.prepare('INSERT INTO portal_sessions(hash,studentId,assignmentKey,connectionHash,expires) VALUES(?,?,?,?,?)').run(hashSecret(raw),studentId,key,hashSecret(student.moodleCipher),now+1800);
- return `${origin}/assignment#session=${raw}`;
+ const lang=language(student.language);return `${origin}/assignment${lang==='en'?'':'?lang='+lang}#session=${raw}`;
 }
 export function assignmentSession(store:Store,raw:string,now=Math.floor(Date.now()/1000)){
  if(!/^[\w-]{43}$/.test(raw))return null;

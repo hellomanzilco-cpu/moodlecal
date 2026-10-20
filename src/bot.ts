@@ -5,15 +5,17 @@ import type { Item, MessageOptions, Messenger, MoodleProfile, SharedProfilePage,
 import { syncFailure } from './sync-errors.ts';
 import {formatStatistics} from './statistics.ts';
 import {profileField} from './profile-sharing.ts';
+import {language,languageNames,intlLocale,tr,buttonCommand} from './locale.ts';
 
 export interface BotServices {
+  privacyUrl?:string;
   connectLink(studentId: number): string;
   rememberTelegramDisplayName?(studentId:number,firstName:string,lastName:string):void;
   clearConnectionDisplayName?(studentId:number):void;
   calendarLink(studentId: number, rotate?: boolean): string;
   sync(studentId: number): Promise<void>;
   claimPairing?(studentId:number, secret:string):Promise<boolean>;
-  updatesStatus?(): string;
+  updatesStatus?(lang?:import('./locale.ts').Language): string;
   refresh?(studentId:number):Promise<string>;
   recentUpdates?(studentId:number):string;
   requestRefresh?(studentId:number):string;
@@ -40,12 +42,13 @@ Settings contains your connection, alerts and time zone.
 For Connect Moodle, open the private sign-in window inside Telegram. Your password is used only to sign in and is not stored. Automatic website alerts require UWED’s event integration.`;
 
 const MAIN_BUTTONS = [
-  ['🏠 Today', '📝 Assignments'],
-  ['📚 My courses', '🔄 Sync'],
+  ['📝 Assignments', '🔄 Sync'],
   ['🧭 More', '⚙️ Settings'],
 ];
 const ASSIGNMENT_BUTTONS = [['📅 Current deadlines this week', '🔜 Upcoming deadlines'], ['📨 Awaiting grades', '✅ Graded'], ['⚠️ Unverified'], ['⬅️ Main menu']];
 const BUTTON_COMMANDS: Record<string, string> = {
+  '🌐 Language':'languagemenu','🔐 Privacy':'privacy',
+  '🇬🇧 English':'lang_en','🇺🇿 O‘zbekcha':'lang_uz','🇷🇺 Русский':'lang_ru',
   '🏠 Today': 'today', '📅 This week': 'week', '🎯 Priorities': 'priorities',
   '📚 My courses': 'courses', '📝 Assignments': 'assignments', '📖 Prepare': 'preparemenu',
   '🗓 Calendar': 'calendar', '⚙️ Settings': 'settings', '🔗 Connect Moodle': 'connect',
@@ -66,7 +69,7 @@ const BUTTON_COMMANDS: Record<string, string> = {
   '👥 Users':'users','🔄 Refresh users':'users','🔐 Profile sharing':'profilesharing',
   '✅ Yes, share my profile':'confirmsharing','✅ Yes, update shared profile':'confirmsharing','🚫 Stop sharing':'revokesharing','⬅️ Settings':'settings',
 };
-type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics' | 'sharing' | 'users';
+type Menu = 'main' | 'settings' | 'assignments' | 'prepare' | 'timezone' | 'disconnect' | 'more' | 'connection' | 'profile' | 'statistics' | 'sharing' | 'users' | 'language' | 'privacy';
 interface MenuState { menu: Menu; expiresAt?: number }
 interface BotReply { text: string; options: MessageOptions; sensitive?:boolean }
 const keyboard = (rows: string[][], placeholder = 'Choose a button below'): MessageOptions => ({ reply_markup: {
@@ -100,6 +103,7 @@ export class Bot {
   private pages = new Map<number,{command:string;arg:string;offset:number;total:number}>();
   private connectionWindows = new Map<number,{url:string;expires:number}>();
   private assignmentButtons=new Map<number,Item[]>();
+  private assignmentUrls=new Map<number,Map<string,string>>();
   private ownerTelegramId:number|null;
   private statisticsDays=new Map<number,1|7>();
 
@@ -115,7 +119,7 @@ export class Bot {
     const envelope=record(update),message=record(envelope?.message),from=record(message?.from),chat=record(message?.chat);
     if(!message||!from||!chat||chat.type!=='private'||typeof message.text!=='string'||!Number.isSafeInteger(from.id)||Number(from.id)<=0||from.id!==chat.id)return false;
     const text=message.text.trim();
-    if(!text||/^\/[a-z]+(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)||BUTTON_COMMANDS[text]||/^📘 \d+:/.test(text))return false;
+    if(!text||/^\/[a-z]+(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)||buttonCommand(text,BUTTON_COMMANDS)||/^📘 \d+:/.test(text))return false;
     const student=this.store.byTelegram(Number(from.id));
     return !student||this.menus.get(student.id)?.menu!=='timezone';
   }
@@ -170,15 +174,17 @@ export class Bot {
   }
 
   private menuOptions(student: Student, menu: Menu): MessageOptions {
+    if(menu==='language')return keyboard([[languageNames.uz,languageNames.ru],[languageNames.en],['⬅️ Settings']]);
     if(!student.moodleCipher || menu==='connection'){
       const url=this.connectionWindow(student.id);
       const button=new URL(url).protocol==='https:'?{text:'🔗 Connect Moodle',web_app:{url}}:{text:'🔗 Connect Moodle'};
-      return {reply_markup:{keyboard:[[button],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
+      return {reply_markup:{keyboard:[[button],[{text:'🌐 Language'}],...(student.moodleCipher?[[{text:'⬅️ Main menu'}]]:[])],resize_keyboard:true,is_persistent:true,input_field_placeholder:'Connect Moodle to begin'}};
     }
-    if(menu==='more')return keyboard([['👤 Profile',...(this.isOwner(student)?['📊 Bot statistics']:[])],['📅 This week','🎯 Priorities'],['📖 Prepare','🗓 Calendar'],['📰 Recent updates','🗓 My timetable'],['⬅️ Main menu']]);
+    if(menu==='more')return keyboard([['📚 My courses','📅 This week'],['👤 Profile','🗓 Calendar'],['❓ Help',...(this.isOwner(student)?['📊 Bot statistics']:[])],['⬅️ Main menu']]);
     if(menu==='statistics'&&this.isOwner(student))return keyboard([...(this.services.sharedProfiles?[['👥 Users']]:[]),['📅 Today stats','🗓 7-day stats'],['🔄 Refresh stats'],['⬅️ More','⬅️ Main menu']]);
     if(menu==='users'&&this.isOwner(student))return keyboard([['🔄 Refresh users'],['📊 Bot statistics'],['⬅️ More','⬅️ Main menu']]);
     if(menu==='profile')return keyboard([...(this.sharingAvailable()?[['🔐 Profile sharing']]:[]),['🔗 Reconnect Moodle'],['⬅️ More','⬅️ Main menu']]);
+    if(menu==='privacy')return keyboard([...(this.sharingAvailable()?[['🔐 Profile sharing']]:[]),['⬅️ Settings']]);
     if(menu==='sharing'&&this.sharingAvailable()){
       const enabled=this.services.sharingStatus!(student.id).enabled;
       return keyboard([[enabled?'✅ Yes, update shared profile':'✅ Yes, share my profile'],...(enabled?[['🚫 Stop sharing']]:[]),['⬅️ Settings']]);
@@ -187,7 +193,7 @@ export class Bot {
     if (menu === 'disconnect') return keyboard([['🗑 Yes, disconnect'], ['⬅️ Main menu']]);
     if (menu === 'settings' || menu === 'timezone') return keyboard([
       [student.paused ? '🔔 Resume alerts' : '🔔 Pause alerts', '🌍 Time zone'],
-      ['ℹ️ Status', '🔗 Reconnect Moodle'], ...(this.sharingAvailable()?[['🔐 Profile sharing']]:[]), ['❓ Help', '🔒 Disconnect'], ['⬅️ Main menu'],
+      ['🌐 Language','🔐 Privacy'],['ℹ️ Status', '🔗 Reconnect Moodle'], ['🔒 Disconnect','⬅️ Main menu'],
     ], menu === 'timezone' ? 'Type a time zone, e.g. Asia/Tashkent' : 'Choose a setting');
     if (menu === 'prepare') {
       const courses = this.store.courses(student.id).filter(course => !course.muted).slice(0, 40);
@@ -205,12 +211,25 @@ export class Bot {
   private async route(student: Student, text: string): Promise<BotReply> {
     const id = student.id;
     this.assignmentButtons.delete(id);
+    this.assignmentUrls.delete(id);
     const slash = /^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text);
     const courseButton = /^📘 (\d+):/.exec(text);
-    let command = slash ? slash[1].toLowerCase() : BUTTON_COMMANDS[text];
+    let command = slash ? slash[1].toLowerCase() : buttonCommand(text,BUTTON_COMMANDS);
     if(command==='disconnect')command='disconnectmenu';
     if(command==='autoupdate')command='sync';
     let arg = slash ? (slash[2] || '').trim() : '';
+    const t=(source:string,values:Record<string,string|number>={})=>tr(language(student.language),source,values);
+    if(command?.startsWith('lang_')||command==='language'&&['en','uz','ru'].includes(arg)){
+      const selected=command.startsWith('lang_')?command.slice(5):arg;
+      student.language=language(selected);this.store.patchStudent(id,{language:student.language});
+      this.connectionWindows.delete(id);this.pages.delete(id);
+      // An earlier consent or disconnect confirmation must not survive a
+      // language change and be confirmed from a stale Telegram keyboard.
+      this.menus.set(id,{menu:student.moodleCipher?'settings':'main'});
+      const options=this.localizedOptions(this.menuOptions(student,student.moodleCipher?'settings':'main'),student);
+      return {text:t('Language saved.')+'\n\n'+(student.moodleCipher?t('Language: {name}',{name:languageNames[student.language]}):this.welcome(student)),options,sensitive:true};
+    }
+    if(command==='language')command='languagemenu';
     if(command==='start'&&arg==='connect'){command='connect';arg='';}
     if(command==='nextpage'||command==='previouspage'){
       const page=this.pages.get(id);
@@ -224,16 +243,19 @@ export class Bot {
     let reply: string;
     let personalizedReturn=false;
     const unstructuredText=!command&&!courseButton;
-    if(command==='connect'){
+    if(command==='languagemenu'){
+      menu='language';reply='🌐 '+t('Choose your language. You can change it later in Settings.')+'\n\n🇺🇿 O‘zbekcha · 🇷🇺 Русский · 🇬🇧 English';
+    }else if(command==='privacy'){
+      menu='privacy';reply=this.privacy(student);
+    }else if(command==='connect'){
       menu='connection';reply=await this.command(student,'connect','');
     } else if(command==='start'&&arg==='connected'&&student.moodleCipher){
       command='assignments';arg='';menu='assignments';personalizedReturn=true;
-      let firstName='';try{firstName=profileField((await this.services.profile?.(id))?.firstName??'');}catch{/* The saved dashboard remains available if a profile refresh is unavailable. */}
-      const greeting=`✅ <b>Moodle connected${firstName?`, ${escapeHtml(firstName)}`:''}</b>\n\nYour live assignment dashboard is ready.`;
+      const greeting=`✅ <b>${t('Moodle connected')}</b>`;
       reply=greeting+'\n\n'+await this.command(student,'assignments','');
     } else if (command === 'start' || command === 'help' || command === 'menu') {
       if(command==='start')this.connectionWindows.delete(id);
-      menu = 'main'; reply = command === 'help' ? HELP : command==='menu' ? '🏠 Main menu\n\nChoose a button below.' : student.moodleCipher ? `🎓 Moodle Calendar\n\nYour UWED study planner.\nIndependent app by Tursunov Sunnatilla; not created by UWED.\n\n✅ Moodle connected\n🕒 Last updated: ${student.lastSyncAt ? formatTime(student.lastSyncAt,student.timezone) : 'not yet synced'}\n\nChoose a button below.` : '🎓 Welcome to Moodle Calendar\n\nAn independent study planner by Tursunov Sunnatilla, not created by UWED.\n\nConnect your Moodle account to see assignment deadlines, submission status and grades.\n\n1. Tap 🔗 Connect Moodle below.\n2. Sign in with your usual Moodle username and password in the private Telegram window.\n3. Your courses and assignments appear after Moodle verifies them.\n\nNo separate registration. Your password is not stored.\n\nContact: @sunnatilla_tursunov';
+      menu = 'main'; reply = command === 'help' ? this.help(student) : student.moodleCipher ? await this.command(student,'assignments','') : this.welcome(student);
       if(command==='start' && /^pair_[A-Za-z0-9_-]{43}$/.test(arg) && this.services.claimPairing) {
         try {
           const connected=await this.services.claimPairing(id,arg.slice(5));
@@ -242,34 +264,34 @@ export class Bot {
         } catch { reply='Moodle could not be connected just now. Your setup link remains available until it expires; try opening it again.\n\n'+HELP; }
       }
     } else if(command==='more'){
-      menu='more';reply='🧭 More\n\nView your profile, plan your week or open your calendar.';
+      menu='more';reply='🧭 '+t('More')+'\n\n'+t('Choose what you need.');
     } else if (command === 'settings') {
-      menu = 'settings'; reply = `⚙️ Settings\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\nChoose a setting below.`;
+      menu='settings';reply=t('⚙️ Settings')+'\n\n'+t('Language: {name}',{name:languageNames[language(student.language)]})+'\n'+t('Alerts: {state}',{state:t(student.paused?'paused':'enabled')})+'\n'+t('Time zone: {zone}',{zone:student.timezone});
     } else if(command==='profilesharing'){
       if(!student.moodleCipher||!this.sharingAvailable()){
-        menu='settings';reply=student.moodleCipher?'Profile sharing is not available.':'Connect Moodle before managing profile sharing.';
+        menu='settings';reply=t(student.moodleCipher?'Profile sharing is unavailable. Try again later.':'Connect Moodle first.');
       }else{
         const status=this.services.sharingStatus!(id);
         this.menus.set(id,{menu:'sharing',expiresAt:nowSeconds()+300});
-        return {text:`🔐 Share profile with creator?\n\nCurrently: ${status.enabled?'On':'Off'}\n\nIf you agree, Tursunov Sunnatilla (@sunnatilla_tursunov), the creator of this independent app, can see your Moodle first name, last name and username in a private user list. These details will be saved encrypted until you stop sharing, reconnect or disconnect.\n\nSharing is optional. You can use all student features without it. Passwords, cookies, coursework and grades are not included.\n\nStop sharing here at any time. This removes the saved shared profile; messages already delivered cannot be erased.\n\nTap Yes below only if you agree.`,options:this.menuOptions(student,'sharing')};
+        return {text:'🔐 '+t('Share profile with creator?')+'\n\n'+t('Currently: {state}',{state:t(status.enabled?'enabled':'paused')})+'\n\n'+t('If you agree, Tursunov Sunnatilla (@sunnatilla_tursunov) can see your Moodle first name, last name and username in a private user list. These details are stored encrypted until you stop sharing, reconnect or disconnect.')+'\n\n'+t('Sharing is optional. You can use all student features without it. Passwords, cookies, coursework and grades are not included.')+'\n\n'+t('You can stop sharing here at any time. This removes the saved shared profile; messages already delivered cannot be erased. Tap Yes only if you agree.'),options:this.localizedOptions(this.menuOptions(student,'sharing'),student)};
       }
     } else if(command==='confirmsharing'){
       menu='profile';
       if(!student.moodleCipher||!this.sharingAvailable()||state?.menu!=='sharing'||(state.expiresAt??0)<nowSeconds()){
-        reply='Open Settings → 🔐 Profile sharing to read the disclosure and confirm your choice.';
+        reply=t('Read the disclosure under Privacy → Profile sharing before confirming.');
       }else{
-        try{await this.services.shareProfile!(id);reply='✅ Profile sharing is on\n\nYour Moodle first name, last name and username are visible to Tursunov Sunnatilla. Open 🔐 Profile sharing to update or stop sharing at any time.';}
-        catch{reply='⚠️ Your profile could not be shared. Moodle may be unavailable or your connection changed. Open 🔐 Profile sharing to check your current setting and try again.';}
+        try{await this.services.shareProfile!(id);reply='✅ '+t('Profile sharing enabled. You can update or stop sharing in Privacy → Profile sharing.');}
+        catch{reply='⚠️ '+t('Profile sharing is unavailable. Try again later.');}
       }
     } else if(command==='revokesharing'){
       menu='settings';
-      if(this.services.revokeProfile){this.services.revokeProfile(id);reply='✅ Profile sharing is off\n\nYour saved shared profile has been removed from the creator’s list. You can continue using the bot. Messages already delivered cannot be erased.';}
-      else reply='Profile sharing is not available.';
+      if(this.services.revokeProfile){this.services.revokeProfile(id);reply='✅ '+t('Profile sharing disabled. Your saved shared profile has been removed. Previously delivered messages cannot be erased.');}
+      else reply=t('Profile sharing is unavailable. Try again later.');
     } else if (command === 'timezonemenu') {
-      menu = 'timezone'; reply = '🌍 Time zone\nType your IANA time zone, for example Asia/Tashkent, Europe/London, or America/New_York. Your manual class times will use this zone.\nTap Main menu to cancel.';
+      menu='timezone';reply=t('🌍 Time zone')+'\n\n'+t('Type an IANA time zone, e.g. Asia/Tashkent.');
     } else if (command === 'disconnectmenu') {
       this.menus.set(id, { menu: 'disconnect', expiresAt: nowSeconds() + 300 });
-      return { text: '🔒 Disconnect Moodle?\nThis deletes your Moodle connection, saved courses, timetable, completion marks, and private calendar links.\nTap Yes, disconnect to confirm, or Main menu to cancel.', options: this.menuOptions(student, 'disconnect') };
+      return {text:'🔒 '+t('Disconnect Moodle?')+'\n\n'+t('This deletes your saved bot connection, courses, timetable and calendar links. Your work in Moodle stays in Moodle.'),options:this.localizedOptions(this.menuOptions(student,'disconnect'),student)};
     } else if (command === 'confirmdisconnect') {
       menu = 'main';
       reply = state?.menu === 'disconnect' && (state.expiresAt ?? 0) >= nowSeconds()
@@ -277,7 +299,7 @@ export class Bot {
         : 'Open ⚙️ Settings → 🔒 Disconnect to review and confirm deleting your connection.';
     } else if (command === 'preparemenu') {
       menu = student.moodleCipher ? 'prepare' : 'main';
-      reply = student.moodleCipher ? '📖 Prepare for class\nChoose a course below. Checklists use Moodle descriptions and links; document contents have not been read.' : await this.command(student, 'prepare', '');
+      reply=student.moodleCipher?t('📖 Prepare')+'\n\n'+t('Choose a course to prepare for class.'):await this.command(student,'prepare','');
     } else if (['assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified'].includes(command ?? '')) {
       menu = student.moodleCipher ? 'assignments' : 'main';
       reply = await this.command(student, command!, arg);
@@ -293,14 +315,15 @@ export class Bot {
       reply = await this.command(student, command, arg);
     } else {
       menu = !student.moodleCipher||state?.menu==='connection'?'connection':'main';
-      reply = 'Choose an option from the menu. For your security, never send Moodle passwords or tokens in chat; sign in only inside the 🔗 Connect Moodle window.';
+      reply=t('Choose a button below')+'\n\n'+t('Connect inside Telegram. Never send your password in chat.');
     }
     if (this.store.getStudent(id)) this.menus.set(id, { menu });
     else this.menus.delete(id);
     const options=this.menuOptions(this.store.getStudent(id) ?? {...student,moodleCipher:null}, menu);
-    if (['assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified'].includes(command ?? '')) options.parse_mode = 'HTML';
+    if (['assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified'].includes(command ?? '')||student.moodleCipher&&['start','menu'].includes(command??'')) options.parse_mode = 'HTML';
+    if(['privacy','calendar','today','week','priorities'].includes(command??''))options.parse_mode='HTML';
     if(student.moodleCipher&&this.services.assignmentLink&&options.reply_markup){
-      const buttons=(this.assignmentButtons.get(id)||[]).filter(item=>/^assignment:[1-9]\d*$/.test(item.key)).map(item=>[{text:'📄 '+item.title.slice(0,48),web_app:{url:this.services.assignmentLink!(id,item.key)}}]);
+      const buttons=(this.assignmentButtons.get(id)||[]).filter(item=>/^assignment:[1-9]\d*$/.test(item.key)).map(item=>[{text:'📄 '+item.title.slice(0,48),web_app:{url:this.taskUrl(student,item)}}]);
       options.reply_markup.keyboard.unshift(...buttons);
     }
     const page=this.pages.get(id);
@@ -310,9 +333,42 @@ export class Bot {
       if(page.offset+6<page.total)navigation.push({text:'➡️ Next page'});
       options.reply_markup.keyboard.unshift(navigation);
     }
-    return { text: reply, options, sensitive:unstructuredText||personalizedReturn||command==='connect'||command==='profile'||['stats','statstoday','statsweek','refreshstats','users'].includes(command??'') };
+    return {text:reply,options:this.localizedOptions(options,student),sensitive:unstructuredText||personalizedReturn||command==='connect'||command==='profile'||!!this.assignmentUrls.get(id)?.size||['stats','statstoday','statsweek','refreshstats','users'].includes(command??'')};
   }
 
+  private localizedOptions(options:MessageOptions,student:Student):MessageOptions{
+    const lang=language(student.language),markup=options.reply_markup;
+    if(!markup)return options;
+    return {...options,reply_markup:{...markup,input_field_placeholder:tr(lang,markup.input_field_placeholder||'Choose a button below'),keyboard:markup.keyboard.map(row=>row.map(button=>({...button,text:tr(lang,button.text)})))}};
+  }
+  private welcome(student:Student):string{
+    const t=(source:string)=>tr(language(student.language),source);
+    return '🎓 Moodle Calendar\n'+t('Your deadlines, in one place.')+'\n\n'+t('Connect your Moodle account to see assignment deadlines, submission status and grades.')+'\n\n'+t('Tap Connect Moodle below. Sign in with your usual Moodle username and password inside Telegram. No separate registration.')+'\n\n🔐 '+t('Your password is never saved. Your access token is encrypted. You can disconnect anytime.')+'\n\n'+t('Independent app by Tursunov Sunnatilla · not created by UWED.')+'\n@sunnatilla_tursunov';
+  }
+  private help(student:Student):string{
+    const t=(source:string)=>tr(language(student.language),source);
+    return '❓ '+t('Help')+'\n\n'+t('1. Connect Moodle.\n2. Open Assignments to read tasks and submit work.\n3. Tap Sync to check for changes.')+'\n\n'+t('Automatic website alerts require UWED’s event integration.')+'\n\n'+t('Independent app by Tursunov Sunnatilla · not created by UWED.')+'\n@sunnatilla_tursunov';
+  }
+  private privacy(student:Student):string{
+    const t=(source:string)=>tr(language(student.language),source);
+    return '🔐 <b>'+t('Your account, your choice.')+'</b>\n\n'+[
+      'Passwords are used for sign-in only and are never stored. Encrypted Moodle access tokens let the bot read your own courses.',
+      'Usage statistics are aggregate counts. Connection diagnostics can include your Telegram display name and a safe error reason for support.',
+      'Sharing your Moodle name and username with the creator is optional and off by default.',
+      'Disconnect removes your active bot records. Existing Telegram messages, Moodle submissions and retained encrypted backups are not erased.',
+    ].map(t).join('\n\n')+(this.services.privacyUrl?'\n\n'+this.link(t('Read the privacy notice'),this.services.privacyUrl+'?lang='+language(student.language)):'')+'\n@sunnatilla_tursunov';
+  }
+  private link(title:string,url:string):string{
+    try{const parsed=new URL(url);if(parsed.protocol==='https:'&&!parsed.username&&!parsed.password)return '<a href="'+escapeHtml(parsed.href,2000)+'">'+escapeHtml(title,160)+'</a>';}catch{}
+    return escapeHtml(title,160);
+  }
+  private taskUrl(student:Student,item:Item):string{
+    if(!this.services.assignmentLink||!/^assignment:[1-9]\d*$/.test(item.key))return item.url;
+    let urls=this.assignmentUrls.get(student.id);if(!urls){urls=new Map();this.assignmentUrls.set(student.id,urls);}
+    if(!urls.has(item.key))urls.set(item.key,this.services.assignmentLink(student.id,item.key));
+    return urls.get(item.key)!;
+  }
+  private date(student:Student,seconds:number):string{return DateTime.fromSeconds(seconds,{zone:student.timezone,locale:intlLocale[language(student.language)]}).toFormat('ccc d LLL, HH:mm');}
   private page<T>(id:number,command:string,arg:string,items:T[]):{items:T[];footer:string}{
     const existing=this.pages.get(id);
     const offset=existing?.command===command && existing.arg===arg ? existing.offset : 0;
@@ -321,71 +377,55 @@ export class Bot {
   }
 
   private coverage(student: Student): string {
-    const notes: string[] = [];
-    if (!student.initialized) notes.push('The first Moodle sync has not completed yet.');
-    const syncFailed = student.lastError?.startsWith('Sync failed.') ?? false;
-    if (student.lastSyncAt !== null && (syncFailed || nowSeconds() - student.lastSyncAt > 15 * 60)) notes.push(`🕒 Saved data may be out of date · ${formatTime(student.lastSyncAt, student.timezone)}. Tap 🔄 Sync.`);
-    if (syncFailed) {
-      notes.push(student.lastError?.includes('UWED Moodle is not responding')
-        ? '⚠️ UWED Moodle is unavailable. Showing the last successful snapshot.'
-        : '⚠️ Sync failed. Showing the last successful snapshot.');
-    } else if (student.lastError) {
-      notes.push('🟠 Moodle synced with limited coverage. Some activities or details may be missing.');
-    }
-    if (student.paused) notes.push('Background notifications are paused. Open Settings → Resume alerts to turn them on.');
-    return notes.length ? `\n\n${notes.join('\n')}` : '';
+    return this.assignmentCoverage(student);
   }
-
-  private itemLine(item: Item, timezone: string): string {
+  private itemLine(item: Item, student:Student): string {
     const task = item.kind === 'assignment' || item.kind === 'quiz';
     const time = task ? item.dueAt : item.startsAt ?? item.dueAt;
     const label = item.key.startsWith('class:') ? 'Class' : task ? 'Due' : item.kind === 'resource' ? 'Material' : item.startsAt !== null ? 'Event' : 'Due';
-    return `${item.title}\n${item.courseName}\n${label}${time !== null ? ` ${formatTime(time, timezone)}` : ''}${item.key.startsWith('class:') ? `\n${item.description}` : ''}${item.url ? `\n${item.url}` : ''}`;
+    return this.link(item.title,item.kind==='assignment'?this.taskUrl(student,item):item.url)+'\n'+escapeHtml(item.courseName,120)+(time!==null?'\n'+tr(language(student.language),'Due: {time}',{time:this.date(student,time)}):'')+(item.key.startsWith('class:')?'\n'+escapeHtml(item.description,200):'');
   }
 
-  private assignmentLine(item: Item, timezone: string, now: number, number: number): string {
-    const lines = [`<b>${number}. ${escapeHtml(item.title)}</b>`, `📘 ${escapeHtml(item.courseName)}`];
-    if (item.availability === 'open') lines.push('🟢 Available now');
-    else if (item.availability === 'upcoming') lines.push('🕒 Not open yet');
-    else if (item.availability === 'restricted') lines.push('🔒 Restricted');
-    else if (item.availability === 'closed') lines.push('⛔ Submissions closed');
-    else lines.push('⚪ Availability unknown');
-    if (item.availability === 'upcoming' && item.availableFrom !== null && item.availableFrom !== undefined) lines.push(`📅 <b>Opens:</b> ${formatTime(item.availableFrom, timezone)}`);
-    if (item.availabilityReason) lines.push(`ℹ️ ${escapeHtml(item.availabilityReason)}`);
-
-    if (item.dueAt === null) lines.push('📅 Deadline unavailable');
+  private assignmentLine(item:Item,student:Student,now:number,index:number):string {
+    const t=(source:string,values:Record<string,string|number>={})=>tr(language(student.language),source,values);
+    const lines=[index+'. '+this.link(item.title,this.taskUrl(student,item)),escapeHtml(item.courseName,120)];
+    const access={open:'Available now',upcoming:'Not open yet',restricted:'Restricted',closed:'Submissions closed',unknown:'Availability unknown'} as const;
+    lines.push((item.availability==='open'?'🟢 ':'')+t(access[item.availability||'unknown']));
+    if(item.availability!=='open'&&item.availabilityReason)lines.push(escapeHtml(item.availabilityReason,180));
+    if(item.availability==='upcoming'&&item.availableFrom)lines.push(t('Opens: {time}',{time:this.date(student,item.availableFrom)}));
+    if(item.dueAt===null)lines.push('📅 '+t('Deadline unavailable'));
     else {
-      lines.push(`📅 <b>Due:</b> ${formatTime(item.dueAt, timezone)}`);
-      const due = DateTime.fromSeconds(item.dueAt, { zone: timezone });
-      const current = DateTime.fromSeconds(now, { zone: timezone });
-      if (item.dueAt <= now) lines.push('⌛ Deadline passed');
+      lines.push('📅 '+t('Due: {time}',{time:this.date(student,item.dueAt)}));
+      const due=DateTime.fromSeconds(item.dueAt,{zone:student.timezone}),current=DateTime.fromSeconds(now,{zone:student.timezone});
+      if (item.dueAt <= now) lines.push('⌛ '+t('Deadline passed'));
       else {
         const days = Math.round(due.startOf('day').diff(current.startOf('day'), 'days').days);
-        lines.push(`⌛ ${days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due in ${days} days`}`);
+        if(days<2)lines.push('⌛ '+t(days===0?'Due today':'Due tomorrow'));
       }
     }
     return lines.join('\n');
   }
 
   private assignmentCoverage(student: Student): string {
+    const t=(source:string)=>tr(language(student.language),source);
     const notes: string[] = [];
     const syncFailed = student.lastError?.startsWith('Sync failed.') ?? false;
     const stale = student.lastSyncAt !== null && nowSeconds() - student.lastSyncAt > 15 * 60;
     if (syncFailed) {
-      notes.push('⚠️ <b>Showing saved data</b>\nThe latest synchronization failed. Verify deadlines in Moodle.');
-    } else if (stale) {
-      notes.push('⚠️ <b>Saved data may be out of date</b>\nVerify deadlines in Moodle.');
-    } else if (student.lastError) {
-      notes.push('🟠 <b>Limited Moodle coverage</b>\nSome assignment or course details may be missing. Verify coverage in Moodle.');
+      notes.push('⚠️ '+t('Showing saved data. The last sync failed. Verify deadlines in Moodle.'));
+    } else {
+      if(stale)notes.push('🕒 '+t('Saved data may be out of date. Tap Sync to check Moodle.'));
+      if(student.lastError)notes.push('🟠 '+t('Limited Moodle coverage. Some activities may be unavailable.'));
     }
-    if (student.paused) notes.push('Notifications are paused in Settings.');
+    if (student.paused) notes.push(t('Notifications are paused in Settings.'));
     return notes.length ? `\n\n${notes.join('\n')}` : '';
   }
 
   private async command(student: Student, command: string, arg: string): Promise<string> {
     const id = student.id;
     const now = nowSeconds();
-    if (command === 'start' || command === 'help') return HELP;
+    const t=(source:string,values:Record<string,string|number>={})=>tr(language(student.language),source,values);
+    if (command === 'start' || command === 'help') return this.help(student);
     if(command==='users'){
       if(!this.isOwner(student))return '🔒 The shared user list is available only to the bot owner.';
       try{
@@ -405,7 +445,7 @@ export class Bot {
     }
     if (command === 'connect') {
       const url=this.connectionWindow(id,true);
-      return `🔗 Connect your Moodle account\n\nTap 🔗 Connect Moodle below to open the private sign-in window inside Telegram.${new URL(url).protocol==='https:'?'':`\n${url}`}\n\nIndependent app by Tursunov Sunnatilla; not created by UWED. Do not forward a private connection link.`;
+      return t('🔗 Connect Moodle')+'\n\n'+t('Connect inside Telegram. Never send your password in chat.')+'\n\n'+t('Your password is never saved. Your access token is encrypted. You can disconnect anytime.')+'\n\n'+t('Independent app by Tursunov Sunnatilla · not created by UWED.')+(new URL(url).protocol==='https:'?'':'\n'+url);
     }
     if (command === 'disconnect') {
       this.store.deleteStudent(id);
@@ -414,47 +454,47 @@ export class Bot {
       this.pages.delete(id);
       this.connectionWindows.delete(id);
       this.statisticsDays.delete(id);
-      return 'Disconnected. Your Moodle connection, saved course data, timetable, completion marks, and calendar links have been deleted. Remove the old calendar subscription from your calendar app. Tap 🔗 Connect Moodle whenever you want to start again.';
+      this.assignmentUrls.delete(id);return t('Disconnected. Your active bot records and private calendar links have been removed.');
     }
     if (command === 'timezone') {
       if (!arg || arg.length > 100 || !IANAZone.isValidZone(arg)) return 'Use a valid IANA time zone, for example /timezone Asia/Tashkent or /timezone Europe/London.';
       this.store.patchStudent(id, { timezone: arg });
-      return `Time zone set to ${arg}. Your manual class times now use this time zone.`;
+      return t('Time zone saved: {zone}',{zone:arg});
     }
     if (command === 'pause' || command === 'resume') {
       this.store.patchStudent(id, { paused: command === 'pause' });
-      if (command === 'pause') return 'Moodle notifications are paused. Tap Resume alerts to continue; Sync now still works manually.';
+      if (command === 'pause') return t('Alerts paused. You can still use Sync.');
       if (student.moodleCipher) {
-        if(this.services.requestRefresh){try{return '🔔 Alerts resumed\n\n'+this.services.requestRefresh(id);}catch(error){return '🔔 Alerts resumed\n\n'+syncFailure(error);}}
+        if(this.services.requestRefresh){try{return t('Alerts enabled.')+'\n\n'+this.services.requestRefresh(id);}catch(error){return t('Alerts enabled.')+'\n\n'+syncFailure(error,language(student.language));}}
         try { await this.services.sync(id); }
         catch { return 'Notifications are enabled. Moodle could not be refreshed just now; your saved information is still available.'; }
       }
-      return `Moodle notifications are enabled.${this.services.updatesStatus ? '\n' + this.services.updatesStatus() : ''}`;
+      return t('Alerts enabled.');
     }
     if (command === 'status') {
       const attempt=Number(this.store.getMeta(`lastSyncAttempt:${id}`));
       const queued=!!this.store.db.prepare('SELECT 1 FROM manual_sync_jobs WHERE studentId=?').get(id);
-      return `ℹ️ Status\n\nConnection: ${student.moodleCipher ? 'Moodle connected' : 'not connected'}\nLast successful sync: ${student.lastSyncAt === null ? 'never' : formatTime(student.lastSyncAt, student.timezone)}\nLast attempt: ${attempt ? formatTime(attempt,student.timezone) : 'none'}\nSync: ${queued ? 'queued / running' : 'idle'}\nCourses: ${this.store.courses(id).length}\nAlerts: ${student.paused ? 'paused' : 'enabled'}\nTime zone: ${student.timezone}\n\n${this.services.updatesStatus ? this.services.updatesStatus() : 'Automatic website alerts require UWED’s event integration.'}${this.coverage(student)}`;
+      return t('ℹ️ Status')+'\n\n'+t(student.moodleCipher?'Moodle connected':'Not connected')+'\n'+t('Last successful sync: {time}',{time:student.lastSyncAt?this.date(student,student.lastSyncAt):t('Not synced yet')})+'\n'+t('Sync: {state}',{state:t(queued?'queued / running':'idle')})+'\n'+t('Courses: {count}',{count:this.store.courses(id).length})+'\n\n'+(this.services.updatesStatus?.(language(student.language))||t('Automatic website updates await a university-enabled event connection.'))+this.coverage(student);
     }
     const connectedCommands = new Set(['courses', 'today', 'week', 'priorities', 'prepare', 'assignments', 'outstanding', 'upcoming', 'awaiting', 'graded', 'unverified', 'done', 'undo', 'mute', 'unmute', 'calendar', 'sync', 'autoupdate','recentupdates','class', 'classes', 'unclass','profile']);
-    if (connectedCommands.has(command) && !student.moodleCipher) return 'Connect your Moodle account first by tapping 🔗 Connect Moodle. Sign-in opens in a private window inside Telegram; never send your password in chat.';
+    if (connectedCommands.has(command) && !student.moodleCipher) return t('Connect Moodle first.')+'\n'+t('Connect inside Telegram. Never send your password in chat.');
 
     switch (command) {
       case 'profile': {
         try{
           if(!this.services.profile)throw new Error('Profile unavailable');
           const profile=await this.services.profile(id);
-          const field=(value:string)=>profileField(value)||'Not provided by Moodle';
-          const sharing=this.sharingAvailable()?`\nProfile sharing with creator: ${this.services.sharingStatus!(id).enabled?'On':'Off'}`:'';
-          return `👤 Your Moodle profile\n\nFirst name: ${field(profile.firstName)}\nLast name: ${field(profile.lastName)}\nUsername: ${field(profile.username)}\nPassword: Not stored${sharing}\n\nYour password cannot be viewed here. To update your connection, tap 🔗 Reconnect Moodle.\n\nProfile details are read from your connected Moodle account.`;
+          const field=(value:string)=>profileField(value)||t('Not provided by Moodle');
+          const sharing=this.sharingAvailable()?'\n'+t('Profile sharing with creator: {state}',{state:t(this.services.sharingStatus!(id).enabled?'enabled':'paused')}):'';
+          return '👤 '+t('Your Moodle profile')+'\n\n'+t('First name: {name}',{name:field(profile.firstName)})+'\n'+t('Last name: {name}',{name:field(profile.lastName)})+'\n'+t('Username: {name}',{name:field(profile.username)})+'\n'+t('Password: Not stored')+sharing;
         }catch{
-          return '👤 Profile unavailable\n\nI could not read your current profile from Moodle. Try 👤 Profile in More again, or reconnect if your access has expired.\n\nPassword: Not stored; it cannot be displayed.';
+          return '👤 '+t('Profile unavailable. Try again later or reconnect in Settings.')+'\n\n'+t('Password: Not stored');
         }
       }
       case 'recentupdates': return this.services.recentUpdates?.(id) || '📰 No recorded website changes yet.';
       case 'courses': {
         const courses = this.store.courses(id);
-        return (courses.length ? arg==='menu' ? `📚 My courses\n\n${courses.length} enrolled courses.\nChoose a course below to prepare for class.` : '📚 My courses\n\n' + courses.map(course => `${course.id}: ${course.name}${course.muted ? ' (muted)' : ''}`).join('\n') : 'No courses have been synced yet. Tap 🔄 Sync, then check Status.') + this.coverage(student);
+        return (courses.length?t('📚 My courses')+'\n\n'+(arg==='menu'?t('Choose a course to prepare for class.'):courses.map(course=>course.id+': '+course.name).join('\n')):t('No courses have been synced yet. Tap Sync.'))+this.coverage(student);
       }
       case 'mute':
       case 'unmute': {
@@ -472,17 +512,17 @@ export class Bot {
         const items = all.filter(item => !item.completed && isFocusItem(item,all,now) && ((item.dueAt !== null && item.dueAt >= start.toSeconds() && item.dueAt < end) || (item.startsAt !== null && item.startsAt >= start.toSeconds() && item.startsAt < end)))
           .sort((a, b) => (a.startsAt ?? a.dueAt ?? Infinity) - (b.startsAt ?? b.dueAt ?? Infinity));
         const page=this.page(id,command,arg,items);
-        return `${command === 'today' ? '🏠 Today' : '📅 Next 7 days'} · ${student.timezone}\n\n${items.length ? page.items.map(item => this.itemLine(item, student.timezone)).join('\n\n') : 'No unfinished deadlines or scheduled classes.'}${page.footer}${this.coverage(student)}`;
+        return t(command==='today'?'🏠 Today':'📅 This week')+' · '+student.timezone+'\n\n'+(items.length?page.items.map(item=>this.itemLine(item,student)).join('\n\n'):t('No unfinished deadlines or scheduled classes.'))+page.footer+this.coverage(student);
       }
       case 'priorities': {
         const items = priorityItems(this.store.items(id), now);
         const page=this.page(id,command,arg,items);
-        return `🎯 Priorities\n\n${items.length ? page.items.map(item => `${item.dueAt !== null && item.dueAt < now ? '⚠️ Overdue · ' : ''}${this.itemLine(item, student.timezone)}`).join('\n\n') : 'No current unfinished tasks found.'}${page.footer}\n\nNext deadline per course and accessible overdue work.${this.coverage(student)}`;
+        return t('🎯 Priorities')+'\n\n'+(items.length?page.items.map(item=>this.itemLine(item,student)).join('\n\n'):t('No current unfinished tasks found.'))+page.footer+this.coverage(student);
       }
       case 'prepare': {
         const courseId = arg ? positiveId(arg) : undefined;
         if (arg && (!courseId || !this.store.courses(id).some(course => course.id === courseId))) return 'Course not found in your enrolled courses. Use /courses, then /prepare COURSE_ID.';
-        return prepareText(this.store.items(id), courseId ?? undefined) + this.coverage(student);
+        return prepareText(this.store.items(id),courseId??undefined,language(student.language))+this.coverage(student);
       }
       case 'assignments':
       case 'outstanding':
@@ -503,33 +543,20 @@ export class Bot {
           graded: assignments.filter(item => item.submissionStatus === 'submitted_graded').length,
         };
         const totalUnfinished = counts.outstanding + counts.upcoming;
-        const distribution = [
-          { icon: '📅', label: 'Current deadlines this week', count: counts.outstanding },
-          { icon: '🔜', label: 'Upcoming deadlines', count: counts.upcoming },
-          { icon: '📨', label: 'Awaiting grades', count: counts.awaiting },
-          { icon: '✅', label: 'Graded', count: counts.graded },
-          { icon: '⚠️', label: 'Status unverified', count: unknown.length },
-        ];
-        const largestCount = Math.max(0, ...distribution.map(category => category.count));
-        const chartRows = distribution.map(category => {
-          const percent = assignments.length ? Math.round(category.count * 100 / assignments.length) : 0;
-          const barLength = largestCount ? category.count ? Math.max(1, Math.round(category.count * 5 / largestCount)) : 0 : 0;
-          const bar = barLength ? '█'.repeat(barLength) : '·';
-          return `${category.icon} ${category.label.padEnd(20)} ${String(category.count).padStart(3)} · ${String(percent).padStart(3)}% ${bar}`;
-        }).join('\n');
-        const summary = `📊 <b>ASSIGNMENTS DASHBOARD</b>\n━━━━━━━━━━━━━━━━━━\n\n<b>TOTAL UNFINISHED</b>\n<b>${totalUnfinished} ${totalUnfinished === 1 ? 'assignment' : 'assignments'}</b>\n\n📈 <b>STATUS DISTRIBUTION</b>\nShare of ${assignments.length} ${assignments.length === 1 ? 'assignment' : 'assignments'}\n<pre>${chartRows}</pre>`;
-        const unknownNotice = unknown.length ? `\n\n⚠️ Moodle did not confirm submission status for ${unknown.length} assignment${unknown.length === 1 ? '' : 's'}. Open ⚠️ Unverified to check each task directly. Upload is enabled only when Moodle confirms the current status and your access.` : '';
-        if (command === 'assignments') return summary + (assignments.length ? '\n\nChoose a category below.' : '\n\nNo assignments have been synced yet.') + this.coverage(student);
+        const next=assignments.filter(item=>item.submissionStatus==='outstanding'&&item.dueAt!==null&&item.dueAt>=now&&isActionable(item,now)).sort((a,b)=>a.dueAt!-b.dueAt!)[0];
+        const summary=t('📝 Assignments')+'\n\n<b>'+t('Unfinished: {count}',{count:totalUnfinished})+'</b>\n'+t('This week / overdue: {count}',{count:counts.outstanding})+'\n'+t('Later / undated: {count}',{count:counts.upcoming})+'\n\n'+t('Awaiting grades: {count}',{count:counts.awaiting})+' · '+t('Graded: {count}',{count:counts.graded})+(unknown.length?'\n⚠️ '+t('Unverified: {count}',{count:unknown.length}):'')+(next?'\n\n'+t('Next: {title}',{title:escapeHtml(next.title)})+'\n'+this.date(student,next.dueAt!):'')+'\n\n🕒 '+(student.lastSyncAt?t('Updated: {time}',{time:this.date(student,student.lastSyncAt)}):t('Not synced yet'));
+        const unknownNotice=unknown.length?'\n\n⚠️ '+t('Moodle has not verified these statuses. Upload is enabled only after a fresh Moodle check confirms access.'):'';
+        if(command==='assignments')return summary+'\n\n'+t(assignments.length?'Choose a category below.':'No assignments have been synced yet.')+this.coverage(student);
         const status = statuses[command];
         const filtered = assignments.filter(item => command==='unverified'?(!item.submissionStatus||item.submissionStatus==='unknown'):item.submissionStatus === status && (command === 'outstanding' ? currentWork(item) : command === 'upcoming' ? !currentWork(item) : true)).sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || a.title.localeCompare(b.title));
-        const headings = { outstanding: '📅 Current deadlines this week', upcoming: '🔜 Upcoming deadlines', awaiting: '📨 Submitted — awaiting grades', graded: '✅ Submitted — graded', unverified:'⚠️ Status unverified — check with Moodle' };
+        const headings={outstanding:'📅 Current deadlines this week',upcoming:'🔜 Upcoming deadlines',awaiting:'📨 Awaiting grades',graded:'✅ Graded',unverified:'⚠️ Unverified'};
         const page=this.page(id,command,arg,filtered);
         this.assignmentButtons.set(id,page.items);
         const firstNumber = (this.pages.get(id)?.offset ?? 0) + 1;
-        const entries = page.items.map((item, index) => `${this.assignmentLine(item, student.timezone, now, firstNumber + index)}${command === 'graded' ? `\nGrade: ${escapeHtml(item.grade || 'See Moodle for grade details')}` : ''}`);
-        const footer = page.footer ? `\n\n📄 Showing ${page.footer.trim()} assignments` : '';
-        const menuHint = this.services.assignmentLink && filtered.length ? '\n\nSelect an assignment from the menu below to view its task details.' : '';
-        return `📚 <b>${headings[command]}</b>\n━━━━━━━━━━━━━━━━━━\n\n${entries.length ? entries.join('\n\n──────────────────\n\n') : 'No assignments in this category.'}${footer}${menuHint}${command==='unverified'?unknownNotice:''}${this.assignmentCoverage(student)}`;
+        const entries=page.items.map((item,index)=>this.assignmentLine(item,student,now,firstNumber+index)+(command==='graded'?'\n'+t('Grade: {grade}',{grade:escapeHtml(item.grade||t('See Moodle for grade details'))}):''));
+        const footer=page.footer?'\n\n'+t('Showing {from}–{to} of {total}',{from:firstNumber,to:firstNumber+page.items.length-1,total:filtered.length}):'';
+        const hint=entries.length?'\n\n'+t('Open a task to read its instructions or submit your work.'):'';
+        return '<b>'+t(headings[command])+'</b>\n\n'+(entries.length?entries.join('\n\n'):t('No assignments in this category.'))+footer+hint+(command==='unverified'?unknownNotice:'')+this.assignmentCoverage(student);
       }
       case 'done':
       case 'undo': {
@@ -538,10 +565,10 @@ export class Bot {
       }
       case 'calendar':
         if (arg && arg.toLowerCase() !== 'rotate') return 'Use /calendar to get your private subscription, or /calendar rotate to revoke the old link.';
-        return `Private calendar subscription:\n${this.services.calendarLink(id, arg.toLowerCase() === 'rotate')}\n\nIn your calendar app, choose Add calendar → Subscribe by URL and paste this link. Anyone with the link can read your calendar. Do not share it. Calendar apps choose their own refresh interval; Telegram alerts arrive independently.${arg ? '\nThe old subscription link is now revoked. Replace it in your calendar app.' : '\nUse /calendar rotate to revoke this link.'}`;
+        return '🗓 '+this.link(t('Private calendar subscription'),this.services.calendarLink(id,arg.toLowerCase()==='rotate'))+'\n\n'+t('Subscribe by URL in Google Calendar, Apple Calendar or Outlook. Keep this private link to yourself; anyone with it can read your calendar. Refresh timing depends on your calendar app.')+'\n\n/calendar rotate';
       case 'sync': {
         const previous = this.manualSyncs.get(id) ?? 0;
-        if (now - previous < 15) return `Please wait ${15 - (now - previous)} seconds before syncing again.`;
+        if (now - previous < 15) return t('Please wait {seconds} seconds before syncing again.',{seconds:15-(now-previous)});
         this.manualSyncs.set(id, now);
         try {
           if(this.services.requestRefresh)return this.services.requestRefresh(id);
@@ -550,7 +577,7 @@ export class Bot {
           const current = this.store.getStudent(id);
           return `Moodle sync finished. Return to the main menu for Today, Priorities, or My courses.${current ? this.coverage(current) : ''}`;
         } catch(error) {
-          return syncFailure(error);
+          return syncFailure(error,language(student.language));
         }
       }
       case 'class': {

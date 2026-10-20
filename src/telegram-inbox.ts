@@ -1,6 +1,7 @@
 import type {Store} from './store.ts';
 import {Vault} from './security.ts';
 import {TelegramError} from './telegram.ts';
+import {buttonCommand} from './locale.ts';
 
 const object=(value:unknown):Record<string,unknown>|null=>value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;
 function normalized(value:unknown):{id:number;chatId:number;payload:unknown}|null{
@@ -18,7 +19,7 @@ function normalized(value:unknown):{id:number;chatId:number;payload:unknown}|nul
 }
 function lane(payload:unknown):'menu'|'network'{
   const text=String(object(object(payload)?.message)?.text||'').trim();
-  if(['👤 Profile','✅ Yes, share my profile','✅ Yes, update shared profile'].includes(text))return 'network';
+  if(buttonCommand(text,{'👤 Profile':'profile','✅ Yes, share my profile':'confirmsharing','✅ Yes, update shared profile':'confirmsharing'}))return 'network';
   const slash=/^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text),command=slash?.[1].toLowerCase();
   return command==='profile'||command==='confirmsharing'||command==='start'&&/^pair_[A-Za-z0-9_-]{43}$/.test((slash?.[2]||'').trim())?'network':'menu';
 }

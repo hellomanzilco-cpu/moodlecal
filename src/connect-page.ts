@@ -1,5 +1,7 @@
+import {localizePage} from './web-locale.ts';
+import type {Language} from './locale.ts';
 function escapeHtml(value:string){return value.replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!));}
-export function connectionPage(nonce:string,moodleUrl:string):string{return `<!doctype html>
+export function connectionPage(nonce:string,moodleUrl:string,lang:Language='en'):string{return localizePage(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Connect · Moodle Calendar</title>
 <style nonce="${nonce}">
 :root{color-scheme:light;--bg:#f6f4ef;--card:#fff;--ink:#202a30;--muted:#647074;--line:#e6e8e5;--accent:#e97717}
@@ -18,7 +20,7 @@ main{max-width:460px;margin:1vh auto;background:var(--card);padding:24px;border:
 <p class="help"><a href="${escapeHtml(moodleUrl)}/login/index.php" target="_blank" rel="noopener noreferrer">Forgot your login? Open UWED Moodle</a></p>
 <label class="consent"><input id="consent" type="checkbox" required><span>I agree to let this independent app read my courses, assignments, submission statuses, visible grades and deadlines.</span></label>
 <p><small>Your password is used only to sign in. It is not stored.</small></p><button id="submit" type="submit">🔗 Connect Moodle</button>
-<details class="help"><summary>How your data is used</summary><p>No Moodle session cookies are collected. Usage statistics are aggregate counts only. Failed or limited connections have separate support diagnostics, as explained in our <a href="/privacy" target="_blank" rel="noopener noreferrer">privacy notice</a>.</p><p>Sharing your Moodle name and username with the creator is off by default. You can opt in separately under Settings → Profile sharing.</p></details></form>
+<details class="help"><summary>How your data is used</summary><p>No Moodle session cookies are collected. Usage statistics are aggregate counts only. Failed or limited connections have separate support diagnostics, as explained in our <a href="/privacy" target="_blank" rel="noopener noreferrer">privacy notice</a>.</p><p>Sharing your Moodle name and username with the creator is off by default. You can opt in separately under Settings → Privacy → Profile sharing.</p></details></form>
 <noscript>Enable JavaScript, then reopen Connect Moodle from the bot.</noscript>
 <section id="progress" class="progress" hidden aria-live="polite" aria-busy="false"><div class="tube" role="progressbar" aria-label="Moodle connection progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="liquid" id="liquid"></div></div><span class="percent" id="percent">0%</span><h2 id="phase">Connecting to Moodle…</h2><p class="muted">Keep this window open while Moodle verifies your account.</p><ol class="steps" id="steps"><li data-phase="connecting">1 · Reach Moodle</li><li data-phase="authenticating">2 · Verify your sign-in</li><li data-phase="profile">3 · Load your profile</li><li data-phase="synchronizing">4 · Verify courses, assignments and submission status</li><li data-phase="dashboard">5 · Save your dashboard</li></ol></section>
 <p id="result" role="status"></p><button id="retry" type="button" hidden>Try again</button><button id="fresh-link" type="button" hidden>🔗 Get a new sign-in button</button><button id="return" type="button" hidden>Return to Telegram</button>
@@ -58,4 +60,4 @@ function returnToBot(action){if(app&&app.initData!==undefined&&app.platform!=='u
 fresh.addEventListener('click',()=>returnToBot('refresh_connection'));
 back.addEventListener('click',()=>{if(progress.classList.contains('success')||progress.classList.contains('partial'))returnToBot('connected');else if(app&&app.platform!=='unknown')app.close();else location.assign('https://t.me/calmoodlebot?start=connect');});
 void checkLink();
-</script></body></html>`;}
+</script></body></html>`,lang);}

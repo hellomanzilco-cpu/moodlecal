@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import {DateTime} from 'luxon';
 import { formatTime } from './planning.ts';
 import type { Course, Item, Snapshot } from './types.ts';
+import {tr,intlLocale} from './locale.ts';
+import type {Language} from './locale.ts';
 
 export interface WebsiteChange {key:string;courseId?:number;type:'new'|'updated'|'removed';title:string;courseName:string;url:string;details:string[]}
 export interface RefreshResult {checkedAt:number;changes:WebsiteChange[];baseline:boolean;warnings?:string[];checked?:{courses:number;assignments:number;materials:number}}
@@ -60,11 +62,17 @@ export function findChanges(previous:Item[],next:Item[],timezone:string):Website
   for(const old of previous)if(!after.has(old.key))changes.push({key:old.key,courseId:old.courseId,type:'removed',title:old.title,courseName:old.courseName,url:old.url,details:['Removed or no longer accessible to your Moodle account.']});
   return changes;
 }
-export function formatChanges(result:RefreshResult,timezone:string):string {
+export function formatChanges(result:RefreshResult,timezone:string,lang:Language='en'):string {
   const warnings=result.warnings||[];
-  const heading=`${warnings.length?'⚠️ Sync finished with limits':'✅ Sync complete'}\n${formatTime(result.checkedAt,timezone)} · ${timezone}`+(result.checked?`\nChecked ${result.checked.courses} courses · ${result.checked.assignments} assignments · ${result.checked.materials} materials`:'');
-  const limits=warnings.length?'\n\nCould not fully check:\n'+warnings.map(warning=>'• '+warning).join('\n'):'';
-  if(result.baseline)return heading+'\n\nYour first snapshot is saved. Future refreshes will show what changed.'+limits;
-  if(!result.changes.length)return heading+'\n\n'+(warnings.length?'No visible changes in the data Moodle allowed us to check.':'No changes since the last successful website check.')+limits;
-  return heading+`\n\n${result.changes.length} change${result.changes.length===1?'':'s'} found:\n\n`+result.changes.map(change=>`${change.type==='new'?'🆕':change.type==='removed'?'➖':'✏️'} ${change.courseName}: ${change.title}\n${change.details.map(detail=>'• '+detail).join('\n')}${change.url?'\n'+change.url:''}`).join('\n\n')+limits;
+  const t=(source:string,values:Record<string,string|number>={})=>tr(lang,source,values);
+  const heading=t(warnings.length?'⚠️ Sync finished with limits':'✅ Sync complete')+'\n'+DateTime.fromSeconds(result.checkedAt,{zone:timezone,locale:intlLocale[lang]}).toFormat('ccc d LLL, HH:mm')+' · '+timezone+(result.checked?'\n'+t('Checked {courses} courses · {assignments} assignments · {materials} materials',result.checked):'');
+  const limits=warnings.length?'\n\n'+t('Could not fully check:')+'\n'+warnings.map(warning=>'• '+warning).join('\n'):'';
+  if(result.baseline)return heading+'\n\n'+t('Your first snapshot is saved. Future refreshes will show what changed.')+limits;
+  if(!result.changes.length)return heading+'\n\n'+t(warnings.length?'No visible changes in the data Moodle allowed us to check.':'No changes since the last successful website check.')+limits;
+  return heading+'\n\n'+t(result.changes.length===1?'{count} change found:':'{count} changes found:',{count:result.changes.length})+'\n\n'+result.changes.map(change=>`${change.type==='new'?'🆕':change.type==='removed'?'➖':'✏️'} ${change.courseName}: ${change.title}\n${change.details.map(detail=>'• '+localizeChangeDetail(detail,lang)).join('\n')}${change.url?'\n'+change.url:''}`).join('\n\n')+limits;
+}
+export function localizeChangeDetail(detail:string,lang:Language):string{
+ const colon=detail.indexOf(':');
+ if(colon>0){const prefix=detail.slice(0,colon+1);return tr(lang,prefix)+detail.slice(colon+1);}
+ return tr(lang,detail);
 }

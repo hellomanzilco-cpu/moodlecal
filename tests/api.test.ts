@@ -45,6 +45,23 @@ test('connection progress belongs to its private attempt, follows actual stages 
  assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);assert.doesNotMatch(state.body,/private-token|secret-password|linkHash/);
  release();assert.equal((await pending).statusCode,200);const complete=await read(f.raw);assert.equal(complete.json().status,'complete');assert.equal(complete.json().percent,100);assert.equal(complete.json().dashboardStatus,'prepared');assert.ok(f.store.getStudent(f.s.id)!.moodleCipher);
 });
+test('language queries localize the sign-in and privacy pages without accepting arbitrary markup',async t=>{
+ const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});
+ for(const lang of ['uz','ru']){
+   const page=await f.app.inject({url:'/connect?lang='+lang});assert.equal(page.statusCode,200);assert.match(page.body,new RegExp('<html lang="'+lang+'"'));
+   const privacy=await f.app.inject({url:'/privacy?lang='+lang});assert.equal(privacy.statusCode,200);assert.match(privacy.body,/90/);assert.match(privacy.body,/Tursunov|Турсунов/);assert.match(privacy.body,/Telegram/);
+ }
+ const invalid=await f.app.inject({url:'/connect?lang='+encodeURIComponent('ru"><script>evil()</script>')});assert.match(invalid.body,/<html lang="en"/);assert.doesNotMatch(invalid.body,/evil\(\)/);
+});
+test('a Russian student gets a localized failed-status response while the Moodle error code stays intact',async t=>{
+ const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});f.store.patchStudent(f.s.id,{language:'ru'});
+ f.moodle.snapshot=async(_token,_now,_only,progress)=>{progress?.('profile');progress?.('synchronizing');const error=new MoodleError('private Moodle error',true,'network');error.operation='mod_assign_get_submission_status';error.apiErrorCode='timeout';throw error;};
+ const headers={origin:f.config.publicUrl},attemptId='r'.repeat(43);
+ assert.equal((await f.app.inject({method:'POST',url:'/api/connect',headers,payload:{linkToken:f.raw,attemptId,asyncMode:true,username:'private-name',password:'private-password',consent:true}})).statusCode,202);
+ let state;for(let i=0;i<50;i++){state=await f.app.inject({method:'POST',url:'/api/connect/status',headers,payload:{linkToken:f.raw,attemptId}});if(state.json().status!=='working')break;await nextTurn();}
+ assert.equal(state!.json().status,'failed');assert.match(state!.json().error,/обязательные данные курсов и заданий/);assert.doesNotMatch(state!.body,/private Moodle|private-password|private-name/);
+ assert.equal(f.store.connectionAttempts(0)[0].apiErrorCode,'timeout');assert.equal(f.store.getStudent(f.s.id)!.moodleCipher,null);
+});
 
 test('invalid Moodle credentials are recorded at sign-in without being confused with access or network failures',async t=>{
  const f=fixture();t.after(async()=>{await f.app.close();f.store.close();});

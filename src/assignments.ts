@@ -5,6 +5,7 @@ import {MoodleError} from './moodle.ts';
 import {findChanges} from './changes.ts';
 import {formatTime} from './planning.ts';
 import {ConcurrencyGate} from './limits.ts';
+import {language,tr} from './locale.ts';
 import type {Store} from './store.ts';
 import type {Vault} from './security.ts';
 import type {AssignmentDetail,AssignmentFile,AssignmentGateway,Messenger,SubmissionFile} from './types.ts';
@@ -120,7 +121,7 @@ export class AssignmentService {
     this.store.db.prepare('UPDATE items SET data=? WHERE studentId=? AND key=?').run(JSON.stringify(next),session.student.id,session.key);
     for(const change of findChanges([item],[next],session.student.timezone))this.store.db.prepare('INSERT INTO change_log(studentId,checkedAt,data) VALUES(?,?,?)').run(session.student.id,this.now(),JSON.stringify(change));
    }
-   this.store.enqueue(session.student.id,`submission:${id}:${state}`,`${submitted?'✅ Submitted for grading':'⚠️ Draft saved'}\n\n${detail.title}\n${detail.courseName}\n${formatTime(this.now(),session.student.timezone)}\n${proof.files.map(f=>`📎 ${f.name} (${f.size} bytes)`).join('\n')}\n\n${message}\n${detail.url}`,true);
+   const lang=language(session.student.language);this.store.enqueue(session.student.id,`submission:${id}:${state}`,`${tr(lang,submitted?'✅ Submitted for grading':'⚠️ Draft saved')}\n\n${detail.title}\n${detail.courseName}\n${formatTime(this.now(),session.student.timezone)}\n${proof.files.map(f=>`📎 ${f.name} (${f.size} bytes)`).join('\n')}\n\n${tr(lang,message)}\n${detail.url}`,true);
   });return true;
  }
  private async run(session:PortalSession,request:SubmissionRequest,files:SubmissionFile[]):Promise<void>{
@@ -149,7 +150,7 @@ export class AssignmentService {
    if(mutationStarted){
     try{const detail=await this.detail(session),proof=JSON.parse(this.operation(session,request.operationId)!.proof) as Proof;if(await this.finish(session,request.operationId,detail,proof))return;}catch{/* A lost response never justifies replaying a write. */}
     this.update(request.operationId,'uncertain','verification_needed','The submission outcome is not confirmed. Moodle may have received it. Check status below or open Moodle before uploading again.');this.store.metric('submission_uncertain',this.now());
-    this.store.enqueue(session.student.id,`submission:${request.operationId}:uncertain`,'⚠️ Submission needs verification\n\nMoodle may have received your work, but the bot could not confirm it. Open Moodle and check the files and submission status before uploading again.',true);
+    this.store.enqueue(session.student.id,`submission:${request.operationId}:uncertain`,tr(language(session.student.language),'⚠️ Submission needs verification\n\nMoodle may have received your work, but the bot could not confirm it. Open Moodle and check the files and submission status before uploading again.'),true);
    }else{
     const message=error instanceof AssignmentError||error instanceof MoodleError?error.message:'The upload could not be completed. No final submission was requested. Try directly in Moodle.';
     this.update(request.operationId,'failed','stopped',message);this.store.metric('submission_failure',this.now());

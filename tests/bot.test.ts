@@ -55,7 +55,7 @@ test('student disclosure precedes consent; owner lists only opted-in profiles an
   const send=async(id:number,text:string)=>{await bot.handle(s.update(id,text));return s.sent.at(-1)!;};
   assert.match((await send(303,'👥 Users')).text,/No students have opted in/);assert.deepEqual(reads,[]);
   await send(101,'✅ Yes, share my profile');assert.deepEqual(reads,[]);
-  await send(101,'⚙️ Settings');assert.ok(labels(s.sent.at(-1)!.options).includes('🔐 Profile sharing'));
+  await send(101,'⚙️ Settings');assert.ok(labels(s.sent.at(-1)!.options).includes('🔐 Privacy'));await send(101,'🔐 Privacy');assert.ok(labels(s.sent.at(-1)!.options).includes('🔐 Profile sharing'));
   const notice=await send(101,'🔐 Profile sharing');assert.match(notice.text,/Tursunov Sunnatilla/);assert.match(notice.text,/first name, last name and username/);assert.match(notice.text,/optional/);assert.match(notice.text,/Passwords, cookies, coursework and grades are not included/);
   await send(101,'⬅️ Settings');assert.equal(sharing.status(alice.id).enabled,false);
   await send(101,'🔐 Profile sharing');await send(101,'✅ Yes, share my profile');assert.equal(sharing.status(alice.id).enabled,true);
@@ -70,8 +70,8 @@ test('profile consent confirmation expires and unconnected accounts cannot enabl
   Object.assign(s.services,{sharingStatus:()=>({enabled:false,sharedAt:null}),async shareProfile(){shares++;},revokeProfile(){}});
   let time=Date.now();t.mock.method(Date,'now',()=>time);
   const bot=new Bot(s.store,{async send(chatId,text,options){s.sent.push({chatId,text,options});}},s.services,'Asia/Tashkent',303);
-  await bot.handle(s.update(101,'🔐 Profile sharing'));time+=301000;await bot.handle(s.update(101,'✅ Yes, share my profile'));assert.equal(shares,0);assert.match(s.sent.at(-1)!.text,/read the disclosure/);
-  await bot.handle(s.update(202,'🔐 Profile sharing'));await bot.handle(s.update(202,'✅ Yes, share my profile'));assert.equal(shares,0);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+  await bot.handle(s.update(101,'🔐 Profile sharing'));time+=301000;await bot.handle(s.update(101,'✅ Yes, share my profile'));assert.equal(shares,0);assert.match(s.sent.at(-1)!.text,/read the disclosure/i);
+  await bot.handle(s.update(202,'🔐 Profile sharing'));await bot.handle(s.update(202,'✅ Yes, share my profile'));assert.equal(shares,0);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);
 });
 
 test('only the numeric owner sees aggregate statistics; forged usernames, commands and cached retries cannot grant access',async t=>{
@@ -104,7 +104,7 @@ test('More opens only the requesting student profile without retaining personal 
   assert.deepEqual(labels(reply.options),['🔗 Reconnect Moodle','⬅️ More','⬅️ Main menu']);
   await s.send(101,'⬅️ More');assert.ok(labels(s.sent.at(-1)!.options).includes('👤 Profile'));
   assert.match(await s.send(202,'/profile'),/bob\.private/);assert.deepEqual(requests,[alice.id,bob.id]);
-  await s.send(303,'👤 Profile');assert.equal(requests.length,2);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+  await s.send(303,'👤 Profile');assert.equal(requests.length,2);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);
 });
 
 test('profile failure hides internal errors and missing fields never invent names',async t=>{
@@ -120,10 +120,10 @@ test('emoji reply buttons navigate the main menu and settings without slash comm
   const alice = s.connected(101, [item('assignment:alice', 'Alice assignment')]);
   const bob = s.connected(202);
   await s.send(101, '/start');
-  assert.match(s.sent.at(-1)!.text, /Your UWED study planner/);
-  assert.ok(s.sent.at(-1)!.text.length<350);
+  assert.match(s.sent.at(-1)!.text, /📝 Assignments/);
+  assert.ok(s.sent.at(-1)!.text.length<450);
   assert.equal(s.sent.at(-1)!.options?.reply_markup?.is_persistent, true);
-  assert.deepEqual(labels(s.sent.at(-1)!.options), ['🏠 Today', '📝 Assignments', '📚 My courses', '🔄 Sync', '🧭 More', '⚙️ Settings']);
+  assert.deepEqual(labels(s.sent.at(-1)!.options), ['📝 Assignments', '🔄 Sync', '🧭 More', '⚙️ Settings']);
   await s.send(101,'🧭 More');assert.ok(labels(s.sent.at(-1)!.options).includes('🗓 Calendar'));
   assert.match(await s.send(101, '🎯 Priorities'), /Alice assignment/);
   await s.send(101, '⚙️ Settings');
@@ -133,7 +133,7 @@ test('emoji reply buttons navigate the main menu and settings without slash comm
   assert.equal(s.store.getStudent(bob.id)!.paused, false);
   assert.ok(labels(s.sent.at(-1)!.options).includes('🔔 Resume alerts'));
   await s.send(101, '🌍 Time zone');
-  assert.match(s.sent.at(-1)!.text, /Type your IANA/);
+  assert.match(s.sent.at(-1)!.text, /Type an IANA/);
   await s.send(101, 'Europe/London');
   assert.equal(s.store.getStudent(alice.id)!.timezone, 'Europe/London');
   assert.equal(s.store.getStudent(bob.id)!.timezone, 'Asia/Tashkent');
@@ -152,32 +152,32 @@ test('assignment buttons show Moodle submission status independently of personal
   s.connected(202, [{ ...item('assignment:bob', 'Bob private report'), submissionStatus: 'submitted_graded', grade: '90' }]);
   s.store.markDone(alice.id, 'assignment:1', true);
   const overview = await s.send(101, '📝 Assignments');
-  assert.match(overview, /📊 <b>ASSIGNMENTS DASHBOARD<\/b>/);
-  assert.match(overview, /<b>TOTAL UNFINISHED<\/b>\n<b>1 assignment<\/b>/);
-  assert.match(overview, /Current deadlines this week\s+1 ·\s+25%/);
-  assert.match(overview, /Upcoming deadlines\s+0 ·\s+0% ·/);
-  assert.match(overview, /Awaiting grades\s+1 ·\s+25%/);
-  assert.match(overview, /Graded\s+1 ·\s+25%/);
-  assert.match(overview, /Status unverified\s+1 ·\s+25%/);
+  assert.match(overview, /📝 Assignments/);
+  assert.match(overview, /<b>Unfinished: 1<\/b>/);
+  assert.match(overview, /This week \/ overdue: 1/);
+  assert.match(overview, /Later \/ undated: 0/);
+  assert.match(overview, /Awaiting grades: 1/);
+  assert.match(overview, /Graded: 1/);
+  assert.match(overview, /Unverified: 1/);
+  assert.doesNotMatch(overview, /<pre>|STATUS DISTRIBUTION|\d+%/);
   assert.doesNotMatch(overview, /Moodle did not confirm submission status/);
   assert.equal(s.sent.at(-1)!.options?.parse_mode, 'HTML');
   assert.deepEqual(labels(s.sent.at(-1)!.options), ['📅 Current deadlines this week', '🔜 Upcoming deadlines', '📨 Awaiting grades', '✅ Graded', '⚠️ Unverified', '⬅️ Main menu']);
   const priorItems = s.store.rawItems(alice.id);
   s.store.saveSnapshot(alice.id, { courses: s.store.courses(alice.id), items: [...priorItems, { ...item('assignment:5', 'New essay'), dueAt: priorItems[0].dueAt, submissionStatus: 'outstanding' }], warnings: [] }, [], now(), now() + 300);
   const updatedOverview = await s.send(101, '📝 Assignments');
-  assert.match(updatedOverview, /<b>TOTAL UNFINISHED<\/b>\n<b>2 assignments<\/b>/);
-  assert.match(updatedOverview, /Current deadlines this week\s+2 ·\s+40%/);
-  assert.match(updatedOverview, /Share of 5 assignments/);
+  assert.match(updatedOverview, /<b>Unfinished: 2<\/b>/);
+  assert.match(updatedOverview, /This week \/ overdue: 2/);
+  assert.match(updatedOverview, /Awaiting grades: 1 · Graded: 1/);
   s.store.patchStudent(alice.id, { lastSyncAt: now() - 3600, lastError: 'Limited optional API coverage.' });
   const staleCoverage = await s.send(101, '📝 Assignments');
   assert.match(staleCoverage, /Saved data may be out of date/);
-  assert.match(staleCoverage, /Moodle synced with limited coverage/);
   assert.doesNotMatch(staleCoverage, /Moodle did not confirm submission status/);
 
   s.connected(303, []);
   const empty = await s.send(303, '📝 Assignments');
-  assert.match(empty, /Share of 0 assignments/);
-  assert.match(empty, /Status unverified\s+0 ·\s+0% ·/);
+  assert.match(empty, /Unfinished: 0/);
+  assert.match(empty, /No assignments have been synced/);
   assert.doesNotMatch(empty, /NaN|Infinity/);
   const outstanding = await s.send(101, '⏳ Outstanding');
   assert.match(outstanding, /Outstanding essay/);
@@ -191,7 +191,7 @@ test('assignment buttons show Moodle submission status independently of personal
   assert.doesNotMatch(graded, /Bob private/);
   s.services.assignmentLink=(studentId,key)=>`https://calendar.test/assignment#${studentId}-${key}`;
   const unverified=await s.send(101,'⚠️ Unverified');
-  assert.match(unverified,/Unknown task/);assert.match(unverified,/Status unverified/);assert.match(unverified,/Upload is enabled only when Moodle confirms/);
+  assert.match(unverified,/Unknown task/);assert.match(unverified,/Unverified/);assert.match(unverified,/Upload is enabled only after a fresh Moodle check/);
   assert.equal(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().filter(button=>button.web_app).length,1);
   assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard.flat().find(button=>button.web_app)!.web_app!.url,/assignment:4/);
 });
@@ -220,8 +220,8 @@ test('assignment categories split current-week deadlines, overdue items, next we
   s.store.patchStudent(student.id, { timezone: 'Asia/Tashkent' });
 
   const overview = await s.send(101, '📝 Assignments');
-  assert.match(overview, /Current deadlines this week\s+4/);
-  assert.match(overview, /Upcoming deadlines\s+2/);
+  assert.match(overview, /This week \/ overdue: 4/);
+  assert.match(overview, /Later \/ undated: 2/);
 
   const currentWeek = await s.send(101, '📅 Current deadlines this week');
   for (const title of ['Monday deadline', 'Saturday deadline', 'Sunday deadline', 'Overdue deadline']) assert.match(currentWeek, new RegExp(title));
@@ -231,8 +231,8 @@ test('assignment categories split current-week deadlines, overdue items, next we
   assert.match(upcoming, /Next Monday deadline/);
   assert.match(upcoming, /Undated assignment/);
   assert.doesNotMatch(upcoming, /<b>\d+\. (?:Monday deadline|Saturday deadline|Sunday deadline|Overdue deadline)<\/b>/);
-  assert.equal((currentWeek.match(/<b>\d+\. /g) ?? []).length, 4);
-  assert.equal((upcoming.match(/<b>\d+\. /g) ?? []).length, 2);
+  assert.equal((currentWeek.match(/\d+\. <a href=/g) ?? []).length, 4);
+  assert.equal((upcoming.match(/\d+\. <a href=/g) ?? []).length, 2);
 });
 
 test('active and upcoming buttons keep inactive tasks out of priorities, agenda, and preparation', async t => {
@@ -246,7 +246,7 @@ test('active and upcoming buttons keep inactive tasks out of priorities, agenda,
     {...item('assignment:submitted','Submitted locked essay'),dueAt:due,submissionStatus:'submitted_ungraded',availability:'restricted',completed:true},
   ]);
   const overview=await s.send(101,'📝 Assignments');
-  assert.match(overview, /<b>TOTAL UNFINISHED<\/b>\n<b>3 assignments<\/b>/);assert.match(overview,/Current deadlines this week\s+1 ·\s+25%/);assert.match(overview,/Upcoming deadlines\s+2 ·\s+50%/);assert.match(overview,/Awaiting grades\s+1 ·\s+25%/);
+  assert.match(overview, /<b>Unfinished: 3<\/b>/);assert.match(overview,/This week \/ overdue: 1/);assert.match(overview,/Later \/ undated: 2/);assert.match(overview,/Awaiting grades: 1/);
   const active=await s.send(101,'⏳ Active now');
   assert.match(active,/Available essay/);assert.doesNotMatch(active,/Future essay|Locked essay|Submitted locked essay/);
   const future=await s.send(101,'🕓 Upcoming / locked');
@@ -313,7 +313,7 @@ test('cached responses preserve buttons across transport retry without repeating
   await new Bot(s.store, messenger, s.services).handle(update);
   assert.equal(s.calls.calendar.length, 1);
   assert.deepEqual(responses[0], responses[1]);
-  assert.ok(labels(responses[1].options).includes('🏠 Today'));
+  assert.ok(labels(responses[1].options).includes('📝 Assignments'));
 });
 
 test('bot accepts only a real student in their private chat', async t => {
@@ -327,7 +327,7 @@ test('bot accepts only a real student in their private chat', async t => {
   await s.send(101, '/connect');
   assert.equal(s.sent.length, 1);
   assert.deepEqual(s.calls.connect, [s.store.byTelegram(101)!.id]);
-  assert.match(s.sent[0].text, /private sign-in window inside Telegram/);
+  assert.match(s.sent[0].text, /Connect inside Telegram/);
   assert.match(s.sent[0].options!.reply_markup!.keyboard[0][0].web_app!.url, /^https:\/\//);
 });
 
@@ -368,7 +368,7 @@ test('course views, completion, and mute settings stay inside one student accoun
 
 test('private calendar requires connection, rotation is explicit, and credentials are never echoed', async t => {
   const s = setup(t);
-  assert.match(await s.send(101, '/calendar'), /Connect your Moodle account first/);
+  assert.match(await s.send(101, '/calendar'), /Connect Moodle first/);
   assert.equal(s.calls.calendar.length, 0);
   const student = s.connected(101);
   await s.send(101, '/calendar');
@@ -376,7 +376,7 @@ test('private calendar requires connection, rotation is explicit, and credential
   assert.deepEqual(s.calls.calendar, [{ id: student.id, rotate: false }, { id: student.id, rotate: true }]);
   const response = await s.send(101, 'my-password-secret');
   assert.doesNotMatch(response, /my-password-secret/);
-  assert.match(response, /never send Moodle passwords or tokens in chat/i);
+  assert.match(response, /Never send your password in chat/i);
 });
 
 test('disconnect removes all personal data, calendar access, and pending notices', async t => {
@@ -488,12 +488,12 @@ test('sync throttles repeated calls and never exposes sensitive failure details'
   assert.match(s.sent.at(-1)!.text, /wait/);
   s.store.patchStudent(student.id, { lastSyncAt: now() - 3600, lastError: 'Sync failed. secret access details' });
   const status = await s.send(101, '/status');
-  assert.match(status, /may be out of date/);
-  assert.match(status, /Sync failed\. Showing the last successful snapshot/);
+  assert.match(status, /Showing saved data/);
+  assert.match(status, /The last sync failed\. Verify deadlines in Moodle/);
   assert.doesNotMatch(status, /secret access details/);
   s.store.patchStudent(student.id, { lastSyncAt: now(), lastError: 'Quiz availability is unavailable.' });
   const partial = await s.send(101, '/status');
-  assert.match(partial, /synced with limited coverage/);
+  assert.match(partial, /Limited Moodle coverage/);
   assert.doesNotMatch(partial, /may be out of date|last successful snapshot/);
 });
 
@@ -564,7 +564,7 @@ test('Telegram long polling filters messages and sanitizes errors while preservi
 test('assignment pages stay concise, support both directions and do not expose another student',async t=>{
  const s=setup(t);s.connected(101,Array.from({length:14},(_,index)=>({...item('assignment:'+index,'Task '+String(index).padStart(2,'0')),submissionStatus:'outstanding' as const,dueAt:now()+3600})));
  s.connected(202,[{...item('assignment:private','Private Bob task'),submissionStatus:'outstanding'}]);
- const first=await s.send(101,'📅 Current deadlines this week');assert.match(first,/Task 00/);assert.doesNotMatch(first,/Task 06|Private Bob/);assert.match(first,/Showing 1–6 of 14 assignments/);
+ const first=await s.send(101,'📅 Current deadlines this week');assert.match(first,/Task 00/);assert.doesNotMatch(first,/Task 06|Private Bob/);assert.match(first,/Showing 1–6 of 14/);
  assert.ok(labels(s.sent.at(-1)!.options).includes('➡️ Next page'));
  const second=await s.send(101,'➡️ Next page');assert.match(second,/Task 06/);assert.doesNotMatch(second,/Task 00|Task 12/);
  assert.match(await s.send(101,'⬅️ Previous page'),/Task 00/);
@@ -580,49 +580,49 @@ test('assignment responses show compact Tashkent deadlines, confirmed availabili
   const student = s.connected(101, [open, future, unknown]);
 
   const currentText = await s.send(101, '📅 Current deadlines this week');
-  assert.match(currentText, /<b>1\. Essay &lt;draft&gt; &amp; final<\/b>\n📘 Economic Diplomacy\n🟢 Available now\n📅 <b>Due:<\/b>/);
-  assert.doesNotMatch(currentText, /moodle\.uwed\.uz|Open assignment/);
+  assert.match(currentText, /1\. <a href="https:\/\/moodle\.uwed\.uz[^\"]*">Essay &lt;draft&gt; &amp; final<\/a>\nEconomic Diplomacy\n🟢 Available now\n📅 Due:/);
+  assert.doesNotMatch(currentText, /\nhttps?:\/\//);
   assert.equal(s.sent.at(-1)!.options?.parse_mode, 'HTML');
 
   const laterText = await s.send(101, '🔜 Upcoming deadlines');
-  assert.match(laterText, /<b>1\. Research task<\/b>[\s\S]*🕒 Not open yet[\s\S]*📅 <b>Opens:<\/b>/);
-  assert.match(laterText, /<b>2\. Untimed task<\/b>[\s\S]*⚪ Availability unknown[\s\S]*📅 Deadline unavailable/);
-  assert.doesNotMatch(laterText, /moodle\.uwed\.uz|Open assignment/);
+  assert.match(laterText, /1\. <a href=[^>]*>Research task<\/a>[\s\S]*Not open yet[\s\S]*Opens:/);
+  assert.match(laterText, /2\. <a href=[^>]*>Untimed task<\/a>[\s\S]*Availability unknown[\s\S]*📅 Deadline unavailable/);
+  assert.doesNotMatch(laterText, /\nhttps?:\/\//);
   assert.doesNotMatch(laterText, /Showing \d+–\d+ of \d+ assignments/);
 
   s.store.patchStudent(student.id, { lastSyncAt: current - 3600, lastError: 'Sync failed. private Moodle diagnostics' });
   const stale = await s.send(101, '🔜 Upcoming deadlines');
-  assert.match(stale, /⚠️ <b>Showing saved data<\/b>\nThe latest synchronization failed\. Verify deadlines in Moodle\./);
+  assert.match(stale, /⚠️ Showing saved data\. The last sync failed\. Verify deadlines in Moodle\./);
   assert.doesNotMatch(stale, /private Moodle diagnostics/);
 });
 test('new students connect inside the Telegram Web App without requesting credentials in chat',async t=>{
  const s=setup(t);const welcome=await s.send(101,'/start');assert.match(welcome,/Connect your Moodle account/);assert.match(welcome,/assignment deadlines/);assert.doesNotMatch(welcome,/\/class|\/mute/);
- assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);
  assert.match(welcome,/Tursunov Sunnatilla/);assert.match(welcome,/not created by UWED/i);assert.match(welcome,/@sunnatilla_tursunov/);
  assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
  assert.equal(s.bot.isTransientChatText(s.update(101,'accidentally pasted credential')),true);assert.equal(s.bot.isTransientChatText(s.update(101,'/help')),false);
- const prompt=await s.send(101,'/connect');assert.match(prompt,/private sign-in window inside Telegram/);assert.doesNotMatch(prompt,/https?:\/\//);
+ const prompt=await s.send(101,'/connect');assert.match(prompt,/Connect inside Telegram/);assert.doesNotMatch(prompt,/https?:\/\//);
  assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
- const accidental=await s.send(101,'my Moodle username');assert.match(accidental,/never send Moodle passwords or tokens in chat/i);assert.doesNotMatch(accidental,/my Moodle username/);
+ const accidental=await s.send(101,'my Moodle username');assert.match(accidental,/Never send your password in chat/i);assert.doesNotMatch(accidental,/my Moodle username/);
  assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
 });test('Mini App return refreshes the menu without trusting the payload for authorization',async t=>{
  const s=setup(t);
  const payload=(id:number)=>({update_id:id,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'connected'}),button_text:'🔗 Connect Moodle'}}});
- await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
- s.connected(101);await s.bot.handle(payload(101));assert.match(s.sent.at(-1)!.text,/ASSIGNMENTS DASHBOARD/);assert.match(s.sent.at(-1)!.text,/Moodle connected/);assert.ok(labels(s.sent.at(-1)!.options).includes('📅 Current deadlines this week'));assert.equal(s.sent.at(-1)!.options!.parse_mode,'HTML');
+ await s.bot.handle(payload(100));assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);assert.equal(s.store.byTelegram(101)!.moodleCipher,null);
+ s.connected(101);await s.bot.handle(payload(101));assert.match(s.sent.at(-1)!.text,/📝 Assignments/);assert.match(s.sent.at(-1)!.text,/Moodle connected/);assert.ok(labels(s.sent.at(-1)!.options).includes('📅 Current deadlines this week'));assert.equal(s.sent.at(-1)!.options!.parse_mode,'HTML');
 });
 test('expired Mini App link recovery creates a fresh button only for the Telegram sender without binding an account',async t=>{
  const s=setup(t);await s.send(101,'/start');const previous=s.calls.connect.length;
  await s.bot.handle({update_id:100,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:JSON.stringify({action:'refresh_connection',studentId:999,token:'forged-token',password:'not-a-password'})}}});
- assert.equal(s.calls.connect.length,previous+1);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ assert.equal(s.calls.connect.length,previous+1);assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);
  assert.equal(s.store.byTelegram(101)!.moodleCipher,null);assert.equal(s.store.byTelegram(999),null);assert.equal(s.calls.sync.length,0);
  assert.doesNotMatch(s.sent.at(-1)!.text,/forged-token|not-a-password/);
  await s.send(101,'/start connect');assert.equal(s.calls.connect.length,previous+2);
 });
-test('successful Mini App return greets with the authenticated Moodle name without caching profile data',async t=>{
- const s=setup(t);s.connected(101,[{...item('assignment:1','Real assignment'),submissionStatus:'outstanding'}]);s.services.profile=async()=>({firstName:'<Amina>',lastName:'Student',username:'private_moodle_name'});
+test('successful Mini App return opens the saved dashboard without a redundant Moodle profile request',async t=>{
+ const s=setup(t);s.connected(101,[{...item('assignment:1','Real assignment'),submissionStatus:'outstanding'}]);let reads=0;s.services.profile=async()=>{reads++;throw new Error('Dashboard must use saved data');};
  const payload={update_id:101,message:{chat:{id:101,type:'private'},from:{id:101,is_bot:false},web_app_data:{data:'{"action":"connected"}'}}};await s.bot.handle(payload);
- const message=s.sent.at(-1)!;assert.match(message.text,/Moodle connected, &lt;Amina&gt;/);assert.match(message.text,/ASSIGNMENTS DASHBOARD/);assert.match(message.text,/Real assignment|TOTAL UNFINISHED/);assert.doesNotMatch(message.text,/private_moodle_name/);assert.equal(Number(s.store.db.prepare('SELECT COUNT(*) AS count FROM replies').get()?.count),0);
+ const message=s.sent.at(-1)!;assert.match(message.text,/Moodle connected/);assert.match(message.text,/📝 Assignments/);assert.match(message.text,/Real assignment|Unfinished/);assert.equal(reads,0);assert.equal(Number(s.store.db.prepare('SELECT COUNT(*) AS count FROM replies').get()?.count),0);
 });
 test('assignment rows open private native windows for only the requesting student and displayed page',async t=>{
  const s=setup(t);const alice=s.connected(101,Array.from({length:8},(_,i)=>({...item('assignment:'+(i+1),'Essay '+i),submissionStatus:'outstanding' as const})));s.connected(202,[{...item('assignment:99','Bob private essay'),submissionStatus:'outstanding'}]);const links:{id:number;key:string}[]=[];s.services.assignmentLink=(id,key)=>{links.push({id,key});return 'https://calendar.test/assignment#session=private-'+id+'-'+key;};
@@ -646,9 +646,9 @@ test('similarly named assignments retain distinct existing menu destinations by 
 });
 test('reconnection keeps the existing Connect button inside Telegram',async t=>{
  const s=setup(t);
- await s.send(101,'/start');await s.send(101,'⚙️ Settings');assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle']);
+ await s.send(101,'/start');await s.send(101,'⚙️ Settings');assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language']);
  s.connected(101);await s.send(101,'🔗 Reconnect Moodle');
- assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','⬅️ Main menu']);
+ assert.deepEqual(labels(s.sent.at(-1)!.options),['🔗 Connect Moodle','🌐 Language','⬅️ Main menu']);
  assert.match(s.sent.at(-1)!.options!.reply_markup!.keyboard[0][0].web_app!.url,/^https:\/\//);
  const generated=s.calls.connect.length;await s.send(101,'⬅️ Main menu');assert.equal(s.calls.connect.length,generated);
 });
