@@ -19,9 +19,9 @@ function normalized(value:unknown):{id:number;chatId:number;payload:unknown}|nul
 }
 function lane(payload:unknown):'menu'|'network'{
   const text=String(object(object(payload)?.message)?.text||'').trim();
-  if(buttonCommand(text,{'👤 Profile':'profile','✅ Yes, share my profile':'confirmsharing','✅ Yes, update shared profile':'confirmsharing'}))return 'network';
+  if(buttonCommand(text,{'👤 Profile':'profile','✅ Yes, share my profile':'confirmsharing','✅ Yes, update shared profile':'confirmsharing','📎 Send preparation files':'examfiles'}))return 'network';
   const slash=/^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text),command=slash?.[1].toLowerCase();
-  return command==='profile'||command==='confirmsharing'||command==='start'&&/^pair_[A-Za-z0-9_-]{43}$/.test((slash?.[2]||'').trim())?'network':'menu';
+  return command==='profile'||command==='confirmsharing'||command==='examfiles'||command==='start'&&/^pair_[A-Za-z0-9_-]{43}$/.test((slash?.[2]||'').trim())?'network':'menu';
 }
 /** Durable encrypted commands; preserve ordering within a chat while serving other students concurrently. */
 export class TelegramInbox{

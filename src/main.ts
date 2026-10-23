@@ -11,6 +11,7 @@ import { createApp } from './api.ts';
 import {AssignmentService} from './assignments.ts';
 import {createEncryptedBackup,pruneEncryptedBackups} from './backups.ts';
 import {RuntimeHealth} from './runtime-health.ts';
+import {ExamResources} from './exam-resources.ts';
 
 async function main() {
   process.umask(0o077);
@@ -24,7 +25,8 @@ async function main() {
   const messenger=telegram || {async send() { throw new Error('Telegram is not configured.'); }};
   const service=new SyncService(store,vault,moodle,messenger,config.publicUrl,config.pollSeconds,undefined,config.ownerTelegramId);
   const assignments=new AssignmentService(store,vault,moodle,messenger);
-  const bot=new Bot(store,messenger,service,config.timezone,config.ownerTelegramId);
+  const examResources=new ExamResources(store,vault,moodle,messenger);
+  const bot=new Bot(store,messenger,Object.assign(service,{examFiles:(id:number,courseId:number)=>examResources.send(id,courseId)}),config.timezone,config.ownerTelegramId);
   const inbox=new TelegramInbox(store,vault,update=>bot.handle(update),undefined,update=>bot.isTransientChatText(update));
   const handleUpdate=async(update:unknown)=>{inbox.accept([update]);};
   const app=createApp(config,store,service,moodle,handleUpdate,assignments,runtime);

@@ -171,6 +171,7 @@ export class Store {
       const s=this.getStudent(id);
       if(s){this.db.prepare('DELETE FROM replies WHERE chatId=?').run(s.chatId);this.db.prepare('DELETE FROM telegram_inbox WHERE chatId=?').run(s.chatId);}
       this.db.prepare('DELETE FROM meta WHERE key=?').run(`lastSyncAttempt:${id}`);
+      this.db.prepare('DELETE FROM meta WHERE key=?').run(`examFilesAt:${id}`);
       this.db.prepare('DELETE FROM students WHERE id=?').run(id);
     });
   }

@@ -20,6 +20,18 @@ test('profile identity reads explicit Moodle name fields and username without re
   assert.ok(!JSON.stringify(identity).includes('never-expose'));assert.ok(!JSON.stringify(identity).includes('private-key'));assert.equal(f.requests.length,1);
 });
 
+test('preparation file metadata is revalidated against current enrolment and module visibility; external URLs are excluded',async()=>{
+ const modules=[
+  {id:10,name:'Final questions',modname:'folder',uservisible:true,contents:[{type:'file',filename:'Questions.pdf',filesize:3,fileurl:site+'/pluginfile.php/8/mod_folder/content/0/Questions.pdf?token=never-persist'},{type:'file',filename:'Bad.pdf',fileurl:'https://attacker.example/pluginfile.php/1/x'}]},
+  {id:11,name:'Hidden',modname:'resource',uservisible:false,contents:[{type:'file',filename:'Hidden.pdf',fileurl:site+'/pluginfile.php/1/x'}]},
+ ];
+ const f=fixture({core_course_get_contents:[{id:1,name:'Final preparation',uservisible:true,modules}]});
+ const documents=await f.client.preparationFiles(token,8,['module:10','module:11']);
+ assert.equal(documents.length,1);assert.equal(documents[0].file.url,site+'/webservice/pluginfile.php/8/mod_folder/content/0/Questions.pdf');assert.doesNotMatch(JSON.stringify(documents),/never-persist|attacker|Hidden/);
+ await assert.rejects(f.client.preparationFiles(token,9,['module:10']),e=>e instanceof MoodleError&&e.reason==='permission');
+ f.responses.core_course_get_contents=[{id:1,uservisible:false,modules}];assert.deepEqual(await f.client.preparationFiles(token,8,['module:10']),[]);
+});
+
 function fixture(overrides: Record<string, unknown> = {}, functions = [...required, ...optional]) {
   const responses: Record<string, unknown> = {
     core_webservice_get_site_info: { userid: 4, fullname: '<b>Ali &amp; Vali</b>', functions: functions.map((name) => ({ name, version: '2024100700' })) },

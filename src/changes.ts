@@ -33,7 +33,10 @@ export function findChanges(previous:Item[],next:Item[],timezone:string):Website
   const status=(value:Item['submissionStatus'])=>({outstanding:'not submitted',submitted_ungraded:'submitted, awaiting grade',submitted_graded:'submitted and graded',unknown:'unavailable'}[value || 'unknown']);
   for(const item of next) {
     const old=before.get(item.key);
-    if(old && (fingerprint(old)===fingerprint(item) || enrichment(old,item)))continue;
+    const comparable={...item};
+    // Learning section metadata for an old snapshot is not a teacher edit.
+    if(old?.sectionName===undefined){delete comparable.sectionName;delete comparable.sectionId;}
+    if(old && (fingerprint(old)===fingerprint(comparable) || enrichment(old,comparable)))continue;
     const details:string[]=[];
     if(!old)details.push('New item found in your Moodle account.');
     else {
@@ -49,6 +52,7 @@ export function findChanges(previous:Item[],next:Item[],timezone:string):Website
       for(const [name,file] of newFiles){const previous=oldFiles.get(name);if(!previous)details.push(`Document added: ${name} (${file.size} bytes)`);else if(file.size!==previous.size||file.modifiedAt!==previous.modifiedAt)details.push(`Document revised: ${name} · ${previous.size} → ${file.size} bytes · modified ${date(previous.modifiedAt||null)} → ${date(file.modifiedAt||null)}`);}
       for(const name of oldFiles.keys())if(!newFiles.has(name))details.push(`Document removed: ${name}`);
       if(old.title!==item.title)details.push(`Renamed from “${old.title}”.`);
+      if(old.sectionName!==undefined&&old.sectionName!==item.sectionName)details.push(`Section: ${old.sectionName||'not provided'} → ${item.sectionName||'not provided'}`);
       if(old.description!==item.description)details.push('Instructions changed.\n'+textDiff(old.description,item.description));
       if(old.canEdit!==item.canEdit && item.canEdit!==undefined)details.push(`Editing allowed: ${old.canEdit===undefined?'unconfirmed':old.canEdit?'yes':'no'} → ${item.canEdit?'yes':'no'}`);
       if(old.canSubmit!==item.canSubmit && item.canSubmit!==undefined)details.push(`Final submission allowed: ${old.canSubmit===undefined?'unconfirmed':old.canSubmit?'yes':'no'} → ${item.canSubmit?'yes':'no'}`);

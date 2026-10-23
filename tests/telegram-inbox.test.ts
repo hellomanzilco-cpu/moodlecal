@@ -53,6 +53,14 @@ test('capitalized and whitespace-prefixed network commands cannot exhaust worker
  gate.resolve();await settle(inbox,8);assert.equal(pending(store),0);
 });
 
+test('exam downloads use bounded network workers in all languages while cached exam menus stay responsive',async t=>{
+ const store=new Store(':memory:'),vault=new Vault(randomBytes(32).toString('base64')),gate=deferred(),started:number[]=[];
+ const inbox=new TelegramInbox(store,vault,async value=>{const id=(value as {update_id:number}).update_id;started.push(id);if(id<=4)await gate.promise;store.finishUpdate(id,NOW);},()=>NOW);
+ t.after(async()=>{gate.resolve();await inbox.drain();store.close();});
+ inbox.accept(['📎 Send preparation files','📎 Tayyorgarlik fayllarini yuborish','📎 Прислать материалы подготовки',' /EXAMFILES 8'].map((text,index)=>message(index+1,100+index,text)).concat([message(5,999,'🎓 Exams')]));
+ await settle(inbox);assert.ok(started.includes(5));assert.equal(started.filter(id=>id<=4).length,2);gate.resolve();await settle(inbox,6);assert.equal(pending(store),0);
+});
+
 test('queued updates retain encrypted minimal payload, omit Telegram identity metadata and survive SQLite reopening',async t=>{
  const directory=mkdtempSync(join(tmpdir(),'moodle-inbox-')),path=join(directory,'app.sqlite'),vault=new Vault(randomBytes(32).toString('base64'));
  let store=new Store(path),inbox=new TelegramInbox(store,vault,async()=>{throw new Error('Stopped inbox must not run');},()=>NOW);inbox.stop();

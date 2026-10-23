@@ -14,6 +14,8 @@ export interface Item {
   startsAt: number | null;
   endsAt: number | null;
   completed: boolean;
+  sectionId?: number;
+  sectionName?: string;
   availability?: Availability;
   availabilityReason?: string;
   availableFrom?: number | null;
@@ -27,6 +29,7 @@ export interface Item {
 }
 export interface Snapshot { courses: Course[]; items: Item[]; warnings: string[] }
 export interface AssignmentFile {name:string;size:number;modifiedAt:number;url:string;mime:string}
+export interface PreparationFile {title:string;file:AssignmentFile}
 export interface AssignmentDetail {
   id:number;courseId:number;title:string;courseName:string;description:string;url:string;
   dueAt:number|null;availableFrom:number|null;cutoffAt:number|null;availability:Availability;availabilityReason:string;
@@ -68,6 +71,7 @@ export interface MoodleGateway {
   identify(token: string): Promise<Identity>;
   login(username: string, password: string): Promise<string>;
   snapshot(token: string, now: number, assignmentsOnly?:boolean, progress?:ConnectionProgress): Promise<Snapshot>;
+  preparationFiles?(token:string,courseId:number,keys:readonly string[]):Promise<PreparationFile[]>;
 }
 export interface ReplyMarkup {
   keyboard: {text:string;web_app?:{url:string}}[][];

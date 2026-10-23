@@ -1,4 +1,4 @@
-import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress,AssignmentDetail,AssignmentFile,AssignmentGateway,SubmissionFile } from './types.ts';
+import type { Course, Identity, Item, MoodleGateway, Snapshot, ConnectionProgress,AssignmentDetail,AssignmentFile,AssignmentGateway,SubmissionFile,PreparationFile } from './types.ts';
 import {readAssignment,submissionParameters,requireNoWriteWarnings,trustedFile} from './assignment-moodle.ts';
 import {boundedBody,CapacityError,ConcurrencyGate,mapConcurrent,requestSignal,withDeadline} from './limits.ts';
 
@@ -325,6 +325,35 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
   async assignment(token:string,assignmentId:number,courseId:number,now:number):Promise<AssignmentDetail>{
     return withDeadline(60000,()=>readAssignment({baseUrl:this.baseUrl,identify:value=>this.identify(value),call:(value,name,params,allowWarning)=>this.call(value,name,params,allowWarning)},token,assignmentId,courseId,now,assignmentAccess));
   }
+  async preparationFiles(token:string,courseId:number,keys:readonly string[]):Promise<PreparationFile[]>{
+    if(!Number.isSafeInteger(courseId)||courseId<=0||keys.length>30||keys.some(key=>! /^(module|assignment):[1-9]\d*$/.test(key)))throw new MoodleError('Invalid preparation resource selection.');
+    return withDeadline(60000,async()=>{
+      const identity=await this.identify(token);
+      const courses=list(await this.call(token,'core_enrol_get_users_courses',{userid:identity.userId,returnusercount:false}));
+      if(!courses.some(raw=>number(object(raw).id)===courseId))throw new MoodleError('This course is no longer available to your account.',false,'permission');
+      const sections=list(await this.call(token,'core_course_get_contents',{courseid:courseId}));
+      const documents:PreparationFile[]=[];
+      for(const raw of sections){
+        const section=object(raw);
+        if(section.uservisible!==undefined&&!bool(section.uservisible))continue;
+        for(const rawModule of list(section.modules)){
+          const module=object(rawModule);
+          if(!keys.includes(`module:${id(module.id)}`)||moduleRestriction(module)||!['resource','folder','page','book'].includes(String(module.modname)))continue;
+          for(const rawFile of module.contents===undefined?[]:list(module.contents)){
+            const source=object(rawFile);
+            if(source.type!==undefined&&source.type!=='file')continue;
+            const file=trustedFile(this.baseUrl,source);
+            if(file&&/\.(?:pdf|docx?|pptx?|xlsx?|txt|png|jpe?g)$/i.test(file.name))documents.push({title:moodleText(module.name),file});
+          }
+        }
+      }
+      for(const key of keys.filter(key=>key.startsWith('assignment:')).slice(0,6)){
+        const detail=await this.assignment(token,Number(key.split(':')[1]),courseId,Math.floor(Date.now()/1000));
+        for(const file of detail.attachments)documents.push({title:detail.title,file});
+      }
+      return [...new Map(documents.map(document=>[document.file.url,document])).values()];
+    });
+  }
   async download(token:string,file:AssignmentFile,maxBytes:number):Promise<Buffer>{
     const trusted=trustedFile(this.baseUrl,{filename:file.name,fileurl:file.url,filesize:file.size});
     if(!trusted||file.size>maxBytes)throw new MoodleError('This file cannot be downloaded here. Open it directly in Moodle.');
@@ -403,7 +432,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
       for (const rawSection of sections) {
         const section = object(rawSection);
         for (const rawModule of list(section.modules)) {
-          const module: RecordValue = { ...object(rawModule), sectionRestricted: section.uservisible !== undefined && !bool(section.uservisible), sectionAvailability: section.availabilityinfo };
+          const module: RecordValue = { ...object(rawModule), sectionRestricted: section.uservisible !== undefined && !bool(section.uservisible), sectionAvailability: section.availabilityinfo, sectionId:number(section.id),sectionName:moodleText(section.name) };
           const cmid = id(module.id);
           modules.set(cmid, module);
           const moduleName = typeof module.modname === 'string' && /^[a-z][a-z0-9_]*$/.test(module.modname) ? module.modname : '';
@@ -419,6 +448,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
             url: this.view(moduleName, cmid),
             modifiedAt: Math.max(number(module.timemodified), number(contentInfo.lastmodified), ...attachedFiles.map((file) => file.modifiedAt), 0),
             dueAt: null, startsAt: null, endsAt: null, completed: isComplete(module), files: attachedFiles,
+            sectionId:number(module.sectionId),sectionName:String(module.sectionName||''),
             availability: restriction ? 'restricted' : moduleName === 'assign' ? 'unknown' : 'open',
             availabilityReason: restriction || (moduleName === 'assign' ? 'Assignment access has not been confirmed by Moodle.' : undefined),
             ...(moduleName === 'assign' ? { submissionStatus: 'unknown' as const } : {}),
@@ -517,6 +547,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
             url: this.view('assign', cmid),
             modifiedAt: Math.max(number(assignment.timemodified), ...attachedFiles.map((file) => file.modifiedAt), 0),
             dueAt, startsAt: null, endsAt: null, completed, files: attachedFiles, submissionStatus, grade,
+            sectionId:number(module?.sectionId),sectionName:String(module?.sectionName||''),
             ...assignmentAccess(assignment, module, lastAttempt, now),
           };
           items.delete(`module:${cmid}`);
@@ -549,6 +580,7 @@ export class MoodleClient implements MoodleGateway,AssignmentGateway {
           title: moodleText(quiz.name), description: moodleText(quiz.intro), url: this.view('quiz', cmid),
           modifiedAt: Math.max(number(quiz.timemodified), ...attachedFiles.map((file) => file.modifiedAt), 0),
           dueAt: timestamp(quiz.timeclose), startsAt: null, endsAt: null, completed, files: attachedFiles,
+          sectionId:number(module?.sectionId),sectionName:String(module?.sectionName||''),
           availableFrom: timestamp(quiz.timeopen), cutoffAt: timestamp(quiz.timeclose),
           availability: timestamp(quiz.timeopen) !== null && number(quiz.timeopen) > now ? 'upcoming'
             : timestamp(quiz.timeclose) !== null && number(quiz.timeclose) < now ? 'closed' : 'open',
